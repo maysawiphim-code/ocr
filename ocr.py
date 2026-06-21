@@ -61,7 +61,8 @@ _DEFAULTS = dict(step=1, bill_count=0,
                  crop_result=None, all_bills=[], lang="th",
                  manual_splits_px=None,   # ตำแหน่งตัดบิลที่ user ปรับเอง (พิกเซลในรูปที่ครอปแล้ว)
                  crop_applied=False,      # True เมื่อ user เพิ่งกด "ยืนยัน Crop" (ไม่ใช่ข้าม)
-                 batch_files=[])          # ไฟล์สำหรับโหมด Batch (1 รูป = 1 บิล วิเคราะห์ทุกรูปพร้อมกัน)
+                 batch_files=[],          # ไฟล์สำหรับโหมด Batch (1 รูป = 1 บิล วิเคราะห์ทุกรูปพร้อมกัน)
+                 ocr_engine="tesseract")  # "tesseract" (ฟรี) หรือ "vision" (Google Cloud Vision API)
 
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -185,8 +186,175 @@ def img_to_bytes_png(img_cv):
         return buf.getvalue()
     except Exception: return None
 
-def preprocess_image(img_cv):
-    gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+def find_paper_contours(img_cv, min_area_frac=0.015):
+    """
+    หาตำแหน่งกระดาษใบเสร็จในภาพ แยกออกจากพื้นหลัง (โต๊ะไม้/พื้นสี/เงา ฯลฯ)
+    ใช้ HSV color space: กระดาษขาวมี saturation ต่ำ + brightness สูง
+    ต่างจากพื้นหลังที่มักมีสี (saturation สูงกว่า) หรือมืดกว่า
+    คืนค่า: list ของ (bbox, contour) เรียงจากซ้ายไปขวา, และ mask ทั้งภาพ
+    """
+    H, W = img_cv.shape[:2]
+    hsv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    paper_mask = ((s < 60) & (v > 120)).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (9, 9))
+    mask = cv2.morphologyEx(paper_mask, cv2.MORPH_CLOSE, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    min_area = H * W * min_area_frac
+    results = [(cv2.boundingRect(c), c) for c in contours if cv2.contourArea(c) > min_area]
+    results.sort(key=lambda r: r[0][0])  # เรียงซ้าย→ขวา
+    return results, mask
+
+
+def deskew_paper(img_cv, contour, pad=10):
+    """
+    แก้มุมเอียงของภาพ (perspective correction): หา minAreaRect ของ contour
+    กระดาษ แล้ว warp ให้กลายเป็นสี่เหลี่ยมตรง ไม่ว่าจะถ่ายเอียงแค่ไหน
+    คืนค่า: (ภาพที่ deskew แล้ว BGR, mask ของกระดาษในพิกัดใหม่หลัง warp)
+    """
+    H, W = img_cv.shape[:2]
+    rect = cv2.minAreaRect(contour)
+    (cx, cy), (rw, rh), angle = rect
+    # normalize: ให้ rw < rh เสมอ (ใบเสร็จสูงกว่ากว้างเป็นปกติ)
+    if rw > rh:
+        rw, rh = rh, rw
+        angle += 90
+
+    box = cv2.boxPoints(rect).astype(np.float32)
+    out_w, out_h = max(int(rw) + pad * 2, 10), max(int(rh) + pad * 2, 10)
+
+    # เรียงจุด 4 มุมให้ตรงลำดับ: top-left, top-right, bottom-right, bottom-left
+    s = box.sum(axis=1)
+    diff = np.diff(box, axis=1).flatten()
+    tl, br = box[np.argmin(s)], box[np.argmax(s)]
+    tr, bl = box[np.argmin(diff)], box[np.argmax(diff)]
+    src_pts = np.array([tl, tr, br, bl], dtype=np.float32)
+    dst_pts = np.array([
+        [pad, pad], [out_w - pad, pad],
+        [out_w - pad, out_h - pad], [pad, out_h - pad]
+    ], dtype=np.float32)
+
+    M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    warped = cv2.warpPerspective(img_cv, M, (out_w, out_h), borderValue=(255, 255, 255))
+
+    mask_full = np.zeros((H, W), dtype=np.uint8)
+    cv2.drawContours(mask_full, [contour], -1, 255, thickness=cv2.FILLED)
+    warped_mask = cv2.warpPerspective(mask_full, M, (out_w, out_h), borderValue=0)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    warped_mask = cv2.dilate(warped_mask, kernel, iterations=1)
+    return warped, warped_mask
+
+
+def correct_illumination(gray):
+    """
+    แก้แสง/เงาที่ตกไม่สม่ำเสมอบนกระดาษ (เช่น เงามือถ่ายภาพ, แสงไฟด้านเดียว)
+    หลักการ background-subtraction: ประมาณ "แนวโน้มแสง" ด้วย morphological
+    closing ขนาดใหญ่ (มองข้ามตัวอักษร เห็นแค่ความสว่างพื้นหลังกว้างๆ)
+    แล้วหารภาพต้นฉบับด้วยค่านั้น ทำให้แสงสม่ำเสมอทั้งภาพโดยไม่กระทบตัวอักษร
+    """
+    kernel_size = max(gray.shape) // 15
+    kernel_size = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
+    kernel_size = max(kernel_size, 3)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+    gray_f = gray.astype(np.float32)
+    bg_f = background.astype(np.float32) + 1e-6
+    corrected = (gray_f / bg_f) * 255
+    return np.clip(corrected, 0, 255).astype(np.uint8)
+
+
+def whiten_background(img_cv, contour=None, bbox=None, pad=6, deskew=True):
+    """
+    เตรียมภาพใบเสร็จให้อ่านง่ายที่สุดก่อน OCR รวม 3 การแก้ไขในฟังก์ชันเดียว:
+    1. แก้มุมเอียง (ถ้ามี contour และ deskew=True) — perspective correction
+    2. ทำพื้นหลังขาวบริสุทธิ์ (ตัดส่วนนอกรูปทรงกระดาษทิ้ง)
+    3. แก้แสง/เงาไม่สม่ำเสมอ + ลด noise จากรอยพับ/ยับเบาๆ (bilateral filter)
+    คืนค่า: ภาพขาวดำ (grayscale) พร้อมส่งต่อให้ preprocess_image/OCR
+    """
+    H, W = img_cv.shape[:2]
+
+    if contour is not None and deskew:
+        # มีรูปทรงกระดาษชัดเจน → แก้มุมเอียง + ตัดพื้นหลังนอกขอบในขั้นตอนเดียว
+        warped, warped_mask = deskew_paper(img_cv, contour, pad=pad + 4)
+        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
+        gray = np.where(warped_mask > 0, gray, 255).astype(np.uint8)
+    elif bbox is not None:
+        x, y, w, h = bbox
+        x0, y0 = max(x - pad, 0), max(y - pad, 0)
+        x1, y1 = min(x + w + pad, W), min(y + h + pad, H)
+        crop = img_cv[y0:y1, x0:x1]
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        if contour is not None:
+            mask_full = np.zeros((H, W), dtype=np.uint8)
+            cv2.drawContours(mask_full, [contour], -1, 255, thickness=cv2.FILLED)
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+            mask_full = cv2.dilate(mask_full, kernel, iterations=1)
+            mask_crop = mask_full[y0:y1, x0:x1]
+            gray = np.where(mask_crop > 0, gray, 255).astype(np.uint8)
+    else:
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+
+    # แก้แสง/เงาก่อน (สำคัญที่สุดสำหรับภาพที่มีเงาทับ)
+    gray = correct_illumination(gray)
+    # ลด noise จากรอยพับ/ยับเบาๆ — รักษาขอบตัวอักษรไว้ ไม่เบลอเหมือน Gaussian blur
+    gray = cv2.bilateralFilter(gray, d=5, sigmaColor=30, sigmaSpace=30)
+    # เพิ่ม contrast เบาๆ ปิดท้าย
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
+    return clahe.apply(gray)
+
+
+def auto_crop_receipts(img_cv, n_expected=None, deskew=True):
+    """
+    ตรวจจับกระดาษใบเสร็จในภาพอัตโนมัติ + แก้มุมเอียง + ครอป ในขั้นตอนเดียว
+    ใช้แทน split_receipts_image() เมื่อภาพมีพื้นหลังที่ไม่ใช่สีขาว/มีลวดลาย
+    (เช่น ถ่ายบนโต๊ะไม้ พื้นกระเบื้อง ผ้าปูโต๊ะลาย ฯลฯ) หรือถ่ายเอียง
+    คืนค่า: list ของภาพ BGR สี (deskew แล้วถ้า deskew=True) สำหรับส่งต่อ OCR
+    """
+    results, mask = find_paper_contours(img_cv)
+    h, w = img_cv.shape[:2]
+
+    if not results:
+        return [img_cv]  # หาไม่เจอ → คืนภาพเดิมทั้งใบ ให้ fallback ไป split ปกติ
+
+    # ถ้ารู้จำนวนบิลที่คาดไว้ แต่หาได้มาก/น้อยกว่า ให้ใช้ภาพเดิมแทน (ป้องกัน false positive)
+    if n_expected and len(results) != n_expected:
+        if abs(len(results) - n_expected) > 1:
+            return [img_cv]
+
+    crops = []
+    for bbox, contour in results:
+        if deskew:
+            warped, warped_mask = deskew_paper(img_cv, contour, pad=10)
+            # ทำพื้นหลังนอกขอบกระดาษเป็นขาว (composite บน 3-channel)
+            white_bg = np.full_like(warped, 255)
+            mask_3ch = cv2.cvtColor(warped_mask, cv2.COLOR_GRAY2BGR)
+            composited = np.where(mask_3ch > 0, warped, white_bg)
+            crops.append(composited)
+        else:
+            x, y, cw, ch = bbox
+            pad = 6
+            x0, y0 = max(x - pad, 0), max(y - pad, 0)
+            x1, y1 = min(x + cw + pad, w), min(y + ch + pad, h)
+            crops.append(img_cv[y0:y1, x0:x1])
+    return crops if crops else [img_cv]
+
+
+def preprocess_image(img_cv, whiten=True):
+    """
+    เตรียมภาพก่อนส่งเข้า OCR:
+    1. (ถ้า whiten=True) แก้มุมเอียง + ทำพื้นหลังขาว + แก้แสงเงา + ลด noise รอยยับ
+    2. ขยาย 2x + denoise + sharpen (เดิม)
+    3. adaptive threshold → ขาวดำคมชัด พร้อม OCR
+
+    หมายเหตุ: เมื่อเรียกจาก run_ocr() ตรงๆ (ไม่ผ่าน auto_crop_receipts ก่อน)
+    จะไม่มี contour ให้ deskew ได้ — ฟังก์ชันนี้จะข้ามขั้นตอนแก้มุมเอียงอัตโนมัติ
+    แต่ยังคงแก้แสงเงา/ลด noise ได้ตามปกติ
+    """
+    if whiten:
+        gray = whiten_background(img_cv)
+    else:
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     gray = cv2.fastNlMeansDenoising(gray, h=10)
     blur = cv2.GaussianBlur(gray, (0, 0), 3)
@@ -322,7 +490,107 @@ def split_by_positions(img_cv, split_px_list):
     return crops if crops else [img_cv]
 
 
-def run_ocr(crop_cv):
+# ─────────────────────────────────────────────────────────────────────────────
+# Google Cloud Vision API — OCR engine ทางเลือก (แม่นกว่า Tesseract มาก
+# โดยเฉพาะกับภาพถ่ายมือถือที่เอียง/เงา/ยับ เพราะเทรนด้วยภาพถ่ายจริงจำนวนมาก
+# ไม่ใช่แค่ font เคลียร์ๆ แบบที่ Tesseract ถนัด)
+#
+# วิธีตั้งค่า (ทำครั้งเดียว):
+# 1. ไปที่ https://console.cloud.google.com/apis/library/vision.googleapis.com
+#    เปิดใช้งาน "Cloud Vision API" สำหรับโปรเจกต์ของคุณ
+# 2. สร้าง API key ที่ https://console.cloud.google.com/apis/credentials
+#    (กด "Create Credentials" → "API key") — คัดลอกคีย์ที่ได้
+# 3. ตั้งค่า environment variable ก่อนรันแอป:
+#      Windows (PowerShell):  $env:GOOGLE_VISION_API_KEY="your-key-here"
+#      Windows (cmd):         set GOOGLE_VISION_API_KEY=your-key-here
+#      Mac/Linux:              export GOOGLE_VISION_API_KEY="your-key-here"
+#    หรือใส่ตรงๆ ในตัวแปร _VISION_API_KEY ด้านล่างนี้แทนก็ได้ (ง่ายกว่าแต่
+#    ไม่ควร commit ขึ้น git เพราะคีย์จะรั่วไหล)
+#
+# Free tier: 1,000 หน่วยแรกของทุกเดือนใช้ฟรี (DOCUMENT_TEXT_DETECTION นับ
+# เป็น 1 หน่วยต่อภาพ) เกินจากนั้นคิดราคาถูกมาก ดูราคาล่าสุดที่
+# https://cloud.google.com/vision/pricing
+# ─────────────────────────────────────────────────────────────────────────────
+_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "AQ.Ab8RN6KC7OU7lHDWroaQBmBmDk0LWFYahDkWvWxTHL5eUE0igA")  # หรือใส่คีย์ตรงๆ ในเครื่องหมาย "" นี้
+
+def is_vision_api_configured() -> bool:
+    """เช็คว่าตั้งค่า Google Vision API key ไว้แล้วหรือยัง"""
+    return bool(_VISION_API_KEY.strip())
+
+
+def run_ocr_google_vision(crop_cv) -> str:
+    """
+    ส่งภาพไปอ่านด้วย Google Cloud Vision API (DOCUMENT_TEXT_DETECTION)
+    ใช้ preprocess_image เดิม (whiten/deskew/แก้แสงเงา) ก่อนส่งเหมือน Tesseract
+    เพราะภาพที่สะอาดขึ้นก็ยังช่วยให้ Vision API แม่นขึ้นไปอีก
+    คืนค่า: ข้อความที่อ่านได้ (ผ่าน clean_text() แล้ว) หรือ raise Exception
+    ถ้าเรียก API ไม่สำเร็จ (ให้ผู้เรียกจัดการ fallback เอง)
+    """
+    import requests  # import เฉพาะตอนใช้งานจริง กันแอป error ถ้าไม่ได้ติดตั้ง
+
+    if not is_vision_api_configured():
+        raise RuntimeError(
+            "ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY — ดูวิธีตั้งค่าในคอมเมนต์ "
+            "เหนือฟังก์ชันนี้ หรือสลับกลับไปใช้ Tesseract (ฟรี ไม่ต้องตั้งค่า)"
+        )
+
+    # Vision API เดิมต้องการภาพสี (BGR/RGB) ไม่ใช่ภาพขาวดำที่ threshold แล้ว
+    # เหมือนที่ preprocess_image คืนมาให้ Tesseract เพราะ Vision API จัดการ
+    # การปรับภาพเองได้ดีอยู่แล้ว และบางครั้งภาพขาวดำ-threshold กลับทำให้มัน
+    # อ่านยากขึ้น (เส้นขอบ contrast จัดเกินไป) — จึงใช้ whiten_background
+    # อย่างเดียว (ไม่ resize/threshold เพิ่ม) แล้วแปลงกลับเป็นภาพสีก่อนส่ง
+    gray = whiten_background(crop_cv)
+    img_for_api = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    success, buf = cv2.imencode(".png", img_for_api)
+    if not success:
+        raise RuntimeError("แปลงภาพเป็น PNG ไม่สำเร็จ ก่อนส่งเข้า Vision API")
+    image_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+
+    url = f"https://vision.googleapis.com/v1/images:annotate?key={_VISION_API_KEY}"
+    payload = {
+        "requests": [{
+            "image": {"content": image_b64},
+            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+            "imageContext": {"languageHints": ["th", "en"]},
+        }]
+    }
+
+    resp = requests.post(url, json=payload, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    resp0 = data.get("responses", [{}])[0]
+    if "error" in resp0:
+        raise RuntimeError(f"Google Vision API error: {resp0['error'].get('message', resp0['error'])}")
+
+    full_text = resp0.get("fullTextAnnotation", {}).get("text", "")
+    if not full_text:
+        # ไม่มีข้อความเลย (ภาพว่าง/อ่านไม่ออกจริงๆ) — ไม่ถือว่า error แต่คืนค่าว่าง
+        return ""
+
+    return clean_text(full_text)
+
+
+def run_ocr(crop_cv, engine: str = "tesseract"):
+    """
+    engine: "tesseract" (ฟรี, local, ค่าเริ่มต้น) หรือ "vision" (Google Cloud
+    Vision API — แม่นกว่ามาก แต่ต้องตั้งค่า API key และมีค่าใช้จ่ายเมื่อเกิน
+    free tier 1,000 ภาพ/เดือน)
+
+    ถ้าเลือก "vision" แต่เรียกไม่สำเร็จ (ไม่มี key, network error, quota
+    หมด ฯลฯ) จะ fallback กลับไปใช้ Tesseract อัตโนมัติ พร้อมข้อความแจ้งเตือน
+    นำหน้าผลลัพธ์ ไม่ทำให้แอปพังหรือ block การทำงาน
+    """
+    if engine == "vision":
+        try:
+            text = run_ocr_google_vision(crop_cv)
+            if text:  # มีข้อความจริง ไม่ใช่ภาพว่าง
+                return text
+            # ภาพว่างจริงๆ (ไม่ใช่ error) — ลอง Tesseract ต่อเผื่ออ่านได้บ้าง
+        except Exception as e:
+            st.session_state.setdefault("_vision_api_warning", str(e))
+
     try:
         text = pytesseract.image_to_string(
             preprocess_image(crop_cv), lang='tha+eng', config='--psm 6')
@@ -345,14 +613,15 @@ def _th_spaced(word: str) -> str:
 # ─── keyword canonical map ────────────────────────────────────────────────────
 _KW_CANONICAL = {
     "ยอดรวม": ["ยอดรวม","ยอตรวม","ยอดราม","บอดรวม","มอดราม","นลดราม","นอดรวม",
-               "นลดร5าม","นลดร6าม","นลดรSาม","ม บ ลดา ม","บะด๑รวม",    # "น ล ด ร 5 า ม" = ยอดรวม OCR เพี้ยน
+               "นลดร5าม","นลดร6าม","นลดรSาม","ยถอดรวม","ยถอดราม","มบลดาม",
+               # "น ล ด ร 5 า ม" / "ย ถอด ร ว ม" / "ม บ ลดา ม" = ยอดรวม OCR เพี้ยน
                "รวมสุทธิ","รวมทั้งสิ้น","Total","NET TOTAL","net total"],
     "เงินสด": ["เงินสด","เง็นสด","เม็นสด","เแงินสด","CASH","QR","QR5","QRcode",
-               "ฝัน","เงินสะด","เฉินสด","เงินส 9"],
+               "ฝัน","เงินสะด","เฉินสด"],
     "เงินทอน": ["เงินทอน","เง็นทอน","เงินทอม","เงินหอน","เงินหอแ",
                 "Change","CHANGE","เงินทอร","เง็นทอร"],
     "สาขา": ["มอร์สาขา","CJมอร์","CJมอร์สาขา","สาขา","สาขาที่","มอร์สาขาที่",
-             "มอร์ลาขา","ซีเจมอร์","ส า ชา ต ี","สาฆาก","สารร","สาฆาถ"],
+             "มอร์ลาขา","ซีเจมอร์"],
 }
 
 def _build_kw_re(key: str) -> re.Pattern:
@@ -424,6 +693,12 @@ def _find_prices_in_line(line: str) -> list:
     for m in re.finditer(r'\b(\d{3,6})\b', c):
         n = m.group(1)
         if n.endswith('00'): prices.append(parse_price(n))
+    if prices: return prices
+    # 4. เลขติดกับตัวอักษรไทย/อังกฤษโดยไม่มีช่องว่างคั่น (\b ใช้ไม่ได้ในกรณีนี้
+    #    เพราะตัวอักษรไทยไม่ใช่ word character ของ \b) เช่น "ส70000wiv"
+    for m in re.finditer(r'(?<!\d)(\d{3,6})(?!\d)', c):
+        n = m.group(1)
+        if n.endswith('00'): prices.append(parse_price(n))
     return prices
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -432,7 +707,8 @@ def _find_prices_in_line(line: str) -> list:
 def _fix_date(d: str) -> str:
     """
     แก้วันที่ที่ OCR อ่านผิด:
-    - ปีเป็น 4 หลักแต่ผิด: 7024→2024, 3024→2024, 9024→2024
+    - ปีเป็น 4 หลักแต่ผิด: 7024→2024, 3024→2024, 9024→2024 (หลักแรกผิด)
+    - ปีเป็น 4 หลักแต่หลักกลางผิด: 2076→2026 (อยู่นอกช่วงสมเหตุสมผล)
     - ปีเป็น 2 หลัก: 24→2024
     """
     parts = re.split(r'[-/.]', d)
@@ -444,6 +720,13 @@ def _fix_date(d: str) -> str:
         if yr[0] not in ('1','2'): yr = '2' + yr[1:]
         # ปีพ.ศ. > 2500 ให้แปลงเป็น ค.ศ.
         if int(yr) > 2500: yr = str(int(yr) - 543)
+        # ตรวจช่วงปีสมเหตุสมผล (2020-2035) — ถ้าไม่ใช่ ลองแก้เป็น 202X
+        # (รองรับกรณี OCR อ่านหลักกลางผิด เช่น 2076 ที่จริงคือ 2026)
+        yr_int = int(yr) if yr.isdigit() else 0
+        if not (2020 <= yr_int <= 2035) and len(yr) == 4:
+            candidate = '202' + yr[3]
+            if candidate.isdigit() and 2020 <= int(candidate) <= 2035:
+                yr = candidate
     elif len(yr) == 2:
         yr = '20' + yr
     # fix month 00 → 01 fallback
@@ -465,84 +748,124 @@ def _clean_bno(raw: str) -> str:
             prev = raw[i-1] if i > 0 else ''
             nxt  = raw[i+1] if i < len(raw)-1 else ''
             result.append('5' if (prev.isdigit() and nxt.isdigit()) else 'S')
-        elif c == "'": result.append('')
+        elif c == '\u00a7': result.append('S')  # § มักเป็น S ที่ OCR อ่านผิด
+        elif c in ("'", "\u2018", "\u2019", "`"): result.append('')  # straight + smart quotes
         else: result.append(c)
     return re.sub(r'S{2,}', 'S', ''.join(result))
 
 def _find_rcpt_no(text: str, compact: str) -> str:
-    # 1. BNO / 8NO — ค้นทีละบรรทัด (หาเลขทั้งหมดในบรรทัดแล้วเอาตัวสุดท้าย)
+    """
+    เลขที่ใบเสร็จ = ทุกอย่างตั้งแต่ BNO จนจบบรรทัด (รวมอักษรขยะที่ติดมาด้วย)
+    ไม่ตัดทิ้งกลางทาง เพื่อไม่ให้สูญเสียข้อมูลที่ OCR อ่านมา
+    """
+    # 1. BNO / 8NO / BN0 — จับทุกอย่างหลัง keyword จนจบบรรทัด ไม่หยุดกลางทาง
+    #    separator รองรับทั้ง straight quote (') และ smart/curly quote (‘ ’) ที่ OCR มักใช้
     for line in text.split('\n'):
         c = _collapse(line)
-        # ตรวจสอบคีย์เวิร์ด
-        if re.search(r"(?:BNO|8NO|พ\s*ผ\s*อ)", c, re.IGNORECASE):
-            # หาเลขทุกชุดในบรรทัด (รวมกรณีมีขีดกลาง)
-            nums = re.findall(r'\d[\d\-]{5,20}\d', c)
-            if nums:
-                # ส่งคืนตัวสุดท้ายทันที (ไม่ต้องผ่าน _clean_bno หากไม่จำเป็นต้องล้างค่า)
-                return nums[-1]
+        m = re.search(r"(?:BNO|8NO|BN0)[:'\u2018\u2019`\-\.\s]*(.+)$", c, re.IGNORECASE)
+        if m:
+            raw_tail = m.group(1).strip()
+            if raw_tail:
+                # พยายามล้าง OCR noise ปกติก่อน ($→S/5, colon→dash) แต่ไม่ตัดอักษรขยะทิ้ง
+                cleaned = _clean_bno(raw_tail)
+                return cleaned if cleaned else raw_tail
 
-    # 2. standalone S\d+N\d+-\d+
+    # 2. standalone S\d+N\d+-\d+ (ไม่ต้องมี BNO นำหน้า)
     m = re.search(r'([A-Z]\d{7,}[A-Z]\d{2}-\d{4,})', compact)
     if m: return m.group(1)
 
-    # 3. ID:E / 1D:€ / lD:E pattern
+    # 3. ID:E / 1D:€ / lD:E pattern (session ID — ใช้เป็น fallback)
     for src in [text, compact]:
-        m = re.search(r'(?:1D|ID|lD)\s*[:\s€£$]\s*([A-Za-z][A-Za-z0-9]{5,24})', src, re.IGNORECASE)
+        m = re.search(
+            r'(?:1D|ID|lD)\s*[:\s€£$]\s*([A-Za-z][A-Za-z0-9]{5,24})',
+            src, re.IGNORECASE)
         if m:
             raw = m.group(1).replace('€','E').replace('£','E').replace('$','5').replace('O','0')
             cut = re.match(r'([A-Z][A-Z0-9]{5,23})', raw)
             if cut: return cut.group(1)
 
-    # 4. fallback: รูปแบบ Rcpt#
+    # 4. fallback: รูปแบบ Rcpt# (เผื่อ OCR อ่าน BNO ผิดเป็นรูปแบบอื่น)
     m = re.search(r'(?:Rcpt|RCPT|Rcopth)[^\d]{0,6}(\d{6,})', compact, re.IGNORECASE)
     if m: return m.group(1)
 
-    # 5. fallback: เลขยาวบนบรรทัด BNO (ถ้าข้อ 1 ไม่เจอแบบเจาะจง ให้หาตัวสุดท้ายในบรรทัด BNO)
+    # 5. fallback: OCR อ่านตัวอักษร BNO เพี้ยนจนไม่เหลือ B/N/O เลย
+    #    (เช่น "ธ ม 0: ร 25110041 ม 02.000877" ที่จริงคือ "BNO:S25110041N02-000877")
+    #    หา pattern ตัวเลข 8 หลัก + (แยก) + 2 หลัก + (แยก) + 6 หลัก ซึ่งเป็นรูปแบบ
+    #    เฉพาะของเลขที่ใบเสร็จ CJ ไม่ปนกับวันที่/เวลาที่ไม่มี digit-run ยาวขนาดนี้
     for line in text.split('\n'):
         c = _collapse(line)
-        if re.search(r"(?:BNO|8NO|พ\s*ผ\s*อ)", c, re.IGNORECASE):
-            nums = re.findall(r'\d[\d\-]{5,20}\d', c)
-            if nums: return nums[-1]
+        m = re.search(r'(\d{8})[^0-9]{0,4}(\d{2})[^0-9]{0,4}(\d{6})', c)
+        if m:
+            return f"S{m.group(1)}N{m.group(2)}-{m.group(3)}"
 
-    # 6. fallback: เลขยาวบนบรรทัดวันที่
+    # 6. fallback: เลขกระจัดกระจายมาก จนแม้แต่ pattern ขั้น 5 ก็จับไม่ได้
+    #    (เช่น "BLO ร 26 ู 051775 ผ น 2 ะ 66172") — รวมเลขทั้งหมดในบรรทัดที่มี
+    #    BNO-variant เข้าด้วยกันเป็นก้อนเดียว แล้วประกอบเป็น BNO ตามสัดส่วน 8:2:6
+    #    แม่นยำน้อยกว่าขั้นก่อน แต่ยังดีกว่า "ไม่พบ" สำหรับ OCR ที่เพี้ยนหนักมาก
+    for line in text.split('\n'):
+        c = _collapse(line)
+        if not re.search(r'B[NL]O|8NO|BN0', c, re.IGNORECASE): continue
+        all_digits = ''.join(re.findall(r'\d', c))
+        n = len(all_digits)
+        if n >= 16:
+            dd = all_digits[:16]
+            return f"S{dd[:8]}N{dd[8:10]}-{dd[10:16]}"
+        elif n >= 10:
+            return f"S{all_digits[:8]}N{all_digits[8:10]}-{all_digits[10:]}"
+
+    # 7. fallback: เลขยาวบนบรรทัดวันที่
     for line in text.split('\n'):
         if _RE_DATE.search(line):
             nums = re.findall(r'\d{6,}', _collapse(line))
-            if nums: return nums[-1] # เปลี่ยนจาก max(len) เป็นตัวสุดท้าย
+            if nums: return max(nums, key=len)
 
     return "ไม่พบ"
 
 def _find_pos_id(text: str, compact: str, lines: list) -> str:
-    # ค้นหาใน 8 บรรทัดแรก (เน้นหาคำว่าสาขา/branch ตามด้วยตัวเลข 5 หลัก)
-    for line in lines[:8]:
+    """
+    รหัสสาขา/POS = เลขรหัสสาขาที่อยู่บรรทัดแรกๆ ของบิล (เช่น "มอร์สาขาที่01745")
+    ให้ความสำคัญกับคำว่า "สาขา" (รวม OCR variant) ก่อนเสมอ ไม่ใช่ POS terminal number
+    ค้นในหลายบรรทัดแรก เพราะบางภาพมีขยะ OCR จากพื้นหลัง/ขอบกระดาษปนมาก่อน
+    เนื้อหาบิลจริงหลายบรรทัด ทำให้ "บรรทัดแรกตามตัวอักษร" ไม่ใช่บรรทัดที่มีรหัสสาขาเสมอไป
+    """
+    _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
+
+    # 1. ค้นใน 12 บรรทัดแรก หาเลข 5 หลักที่อยู่ติดกับคำว่า "สาขา" (รวม OCR variant)
+    for line in lines[:12]:
         c = _collapse(line)
-        # ค้นหาคำว่า "สาขา" หรือ "branch" แล้วตามด้วยตัวเลข 5 หลัก
-        m2 = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{5})', c, re.IGNORECASE)
-        if m2: 
-            return m2.group(1)
-        
-        # ถ้าไม่เจอคำนำหน้า ให้หาตัวเลข 5 หลักโดดๆ ในบรรทัดนั้น
-        nums = re.findall(r'\b\d{5}\b', c)
-        if nums: 
-            return nums[-1]
+        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(\d{5})', c, re.IGNORECASE)
+        if m: return m.group(1)
 
-    # fallback: ค้นหาใน compact ทั้งก้อน เผื่อรหัสสาขาไม่ได้อยู่บรรทัดต้นๆ
-    # (เพิ่มเงื่อนไขค้นหาเลข 5 หลักใน compact)
+    # 2. ถ้าไม่เจอคำนำหน้าเลย ลองหาบรรทัดที่มีทั้งคำว่า "มอร์" และเลข 5 หลัก
+    #    (ชื่อร้าน "มอร์" มักอยู่ติดกับรหัสสาขาเสมอ แม้คำว่า "สาขา" จะอ่านผิดไปไกล)
+    for line in lines[:12]:
+        c = _collapse(line)
+        if re.search(r'มอร์|ม อ ร', line, re.IGNORECASE) or 'มอร์' in c:
+            nums = re.findall(r'\d{5}', c)
+            if nums: return nums[0]
+
+    # 3. fallback: เลข 5 หลักตัวแรกที่เจอใน compact ทั้งก้อน (ก่อนถึง TAX ID ซึ่งยาว 13 หลัก)
+    m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{5})', compact, re.IGNORECASE)
+    if m: return m.group(1)
     nums_all = re.findall(r'\b\d{5}\b', compact)
-    if nums_all:
-        return nums_all[-1]
+    if nums_all: return nums_all[0]
 
-    # หาเลข 4 หลักขึ้นไปในวงเล็บ (ถ้าต้องการเก็บเคสนี้ไว้)
+    # 4. fallback สุดท้าย: POS terminal number (NO1/NO2/...) ถ้าไม่มีเลขสาขาเลย
+    for line in lines[:10]:
+        c = _collapse(line)
+        m = re.search(r'POS\s*[.\s]*NO\s*S?\s*(\d{1,2})\b', c, re.IGNORECASE)
+        if m: return f"NO{m.group(1)}"
+        m = re.search(r'POS\s*(?:ID|:)?\s*#?\s*([A-Za-z]\d{1,3})(?!\d)', c, re.IGNORECASE)
+        if m: return m.group(1)
+
     m = re.search(r'\((\d{4,})\)', compact)
-    if m: 
-        return m.group(1)
-
+    if m: return m.group(1)
     return "ไม่พบ"
 
 def _find_branch(text: str, compact: str, lines: list) -> str:
     # 1. จัดการกรณี CJ / มอร์ (ใช้ Regex ที่ดึงตัวเลขแยกจากคำนำหน้า)
     cj_pattern = r'(?:ซีเจ|CJ)?ม[อ][ร][ลซ]์?.*?สาขา(?:ที่|เลขที่)?\s*?(\d{2,}(?:\s*\d+)*)'
-    
+    bigc_pattern = r'(Big\s*C\s*(?:Mini|Extra)?|BCM|BCH)'
 
     for line in lines[:12]:
         c = _collapse(line)
@@ -550,7 +873,9 @@ def _find_branch(text: str, compact: str, lines: list) -> str:
         if m_cj:
             raw_num = m_cj.group(1).replace(" ", "")
             return f"สาขา {raw_num}"
-    
+        m_bigc = re.search(bigc_pattern, c, re.IGNORECASE)
+        if m_bigc:
+            return line.strip()
 
     m_compact = re.search(r'(?:มอร์|สาขา)\s*?(\d{2,}(?:\s*\d+)*)', compact, re.IGNORECASE)
     if m_compact:
@@ -573,6 +898,36 @@ def _find_amount(text_lines: list, kw_re: re.Pattern, allow_zero: bool = True) -
             if val > 0 or allow_zero: return val
     return 0.0
 
+
+def _find_amounts_positional(lines: list) -> list:
+    """
+    fallback สุดท้ายสำหรับ ยอดรวม/เงินสด/เงินทอน เมื่อ OCR เพี้ยนหนักจน
+    keyword (ยอดรวม/เงินสด/เงินทอน และทุก OCR-variant ที่รู้จัก) หาไม่เจอเลย
+    เช่น "ยอดรวม" กลายเป็น "บลดราม", "เงินสด" กลายเป็น "เง น 11 า น"
+
+    หลักการ: ใบเสร็จ CJ Express มีโครงสร้างคงที่เสมอ — หลังบรรทัด
+    "...รายการ" (สรุปจำนวนสินค้า) จะตามด้วย ยอดรวม → เงินสด/QR → เงินทอน
+    เรียงลำดับแบบนี้เสมอ ไม่ว่า keyword จะเพี้ยนแค่ไหน เราจึงดึงราคาจาก
+    3 บรรทัดแรกที่มีตัวเลขถัดจากจุดนั้นมาใช้ตามตำแหน่งได้
+    คืนค่า: list ของราคา (float) ตามลำดับ [ยอดรวม, เงินสด, เงินทอน] (อาจสั้นกว่า 3 ถ้าหาไม่ครบ)
+    """
+    end_idx = 0
+    for idx, line in enumerate(lines):
+        # รองรับ OCR สับสน ร↔ง (เช่น "รายการ" อ่านเป็น "งายการ")
+        if re.search(r'\d\s*[รง]\s*า\s*ย\s*ก\s*า\s*ร', line):
+            end_idx = idx + 1
+            break
+
+    found = []
+    for line in lines[end_idx:]:
+        prices = _find_prices_in_line(line) or _find_prices_in_line(_collapse(line))
+        if prices:
+            found.append(parse_price(prices[-1]))
+        if len(found) >= 3:
+            break
+    return found
+
+
 def _find_tax_id(compact: str) -> str:
     m = _RE_TAX_ID.search(compact)
     return m.group(1) if m else "ไม่พบ"
@@ -583,31 +938,22 @@ def _find_tax_id(compact: str) -> str:
 def clean_text(text: str) -> str:
     if not text: return ""
 
-    # Pass 0: จัดการช่องว่างระหว่างตัวอักษรไทย (เช่น "โ ย เ ก ิ ร ั ต" -> "โยเกิร์ต")
-    # ค้นหาอักษรไทยที่ตามด้วยช่องว่างและอักษรไทยตัวถัดไป
-    text = re.sub(r'([\u0E00-\u0E7F])\s+(?=[\u0E00-\u0E7F])', r'\1', text)
-    text = re.sub(r'[ \t]+', ' ', text)
-    # Pass 1: normalize whitespace
+    # pass 1: normalize whitespace
     lines = [re.sub(r'[ \t]+', ' ', ln).strip() for ln in text.split('\n')]
-    
+
     # pass 2: spaced-keyword collapse
     _SPACED = [
         (r'ย\s*อ\s*[ดต]\s*ร\s*ว\s*ม',          'ยอดรวม'),
         (r'น\s*ล\s*ด\s*ร\s*[า5]\s*ม',           'ยอดรวม'),   # "น ล ด ร า ม"
         (r'บ\s*อ\s*ด\s*ร\s*ว\s*ม',              'ยอดรวม'),
         (r'ม\s*อ\s*ด\s*ร\s*า\s*ม',              'ยอดรวม'),
-        (r'ม\s*บ\s*ล\s*ด\s*า\s*ม',              'ยอดรวม'),
         (r'เ\s*ง\s*ิ?\s*น\s*ส\s*ด',             'เงินสด'),
         (r'เ\s*ง\s*ิ?\s*น\s*ท\s*อ\s*น',         'เงินทอน'),
         (r'เ\s*ง\s*ิ?\s*น\s*ห\s*อ\s*[นแ]',      'เงินทอน'),
-        (r'เ\s*ง\s*[ิี]\s*น\s*[11]\s*[า]\s*น',    'เงินทอน'),
         (r'เ\s*ง\s*[ิี]\s*น\s*[7]\s*[ไ]',        'เงินทอน'),   # "เงิน 7 ไน"
         (r'บ\s*า\s*ท',                            'บาท'),
-        (r'บ\s*จ\s*า\s*ท',                        'บาท'),#บจาท
         (r'ม\s*อ\s*ร\s*์\s*[สลซ]\s*า\s*ข\s*า',  'มอร์สาขา'),
         (r'ส\s*า\s*ข\s*า\s*[หท]\s*[ิี]\s*[่]?',  'สาขาที่'),
-        (r'ส\s*า\s*ช\s*า\s*[ต]\s*[ิี]\s*[่]?',  'สาขาที่'),
-        
         (r'ใ\s*บ\s*เ\s*[สล]\s*ร\s*[็]\s*จ',      'ใบเสร็จ'),
         (r'T\s*o\s*t\s*a\s*[l1i]',               'Total'),
         (r'C\s*A\s*S\s*H',                        'CASH'),
@@ -622,15 +968,6 @@ def clean_text(text: str) -> str:
         for pat, rep in _SPACED:
             line = re.sub(pat, rep, line, flags=re.IGNORECASE)
         out.append(line)
-    # Pass 1: Normalize whitespace และลบสัญลักษณ์ขยะ
-    # เพิ่ม [;] หรือสัญลักษณ์อื่นๆ ที่มักจะติดมาไว้ใน [...]
-    lines = []
-    for ln in text.split('\n'):
-        # ลบ ; และสัญลักษณ์แปลกๆ ที่มักจะอยู่ต้นบรรทัดทิ้ง
-        clean_ln = re.sub(r'^[;:\s]+', '', ln) 
-        clean_ln = re.sub(r'[ \t]+', ' ', clean_ln).strip()
-        if clean_ln:
-            lines.append(clean_ln)
 
     # pass 3: string replacements
     text2 = '\n'.join(out)
@@ -638,10 +975,10 @@ def clean_text(text: str) -> str:
         # Total variants
         "Tota)":"Total","Tota1":"Total","Toial":"Total","Totai":"Total",
         # ยอดรวม
-        "ยอดราม":"ยอดรวม","ยอตรวม":"ยอดรวม","รวมสุทธิ":"ยอดรวม","Net Total":"ยอดรวม","บะด๑รวม":"ยอดรวม",
+        "ยอดราม":"ยอดรวม","ยอตรวม":"ยอดรวม","รวมสุทธิ":"ยอดรวม","Net Total":"ยอดรวม",
         # เงินสด
         "เง็นสด":"เงินสด","เม็นสด":"เงินสด","เแงินสด":"เงินสด",
-        "Quan":"เงินสด","QUA N":"เงินสด","ฝัน ต":"เงินสด","ฝันต":"เงินสด","เงินส 9":"เงินสด",
+        "Quan":"เงินสด","QUA N":"เงินสด","ฝัน ต":"เงินสด","ฝันต":"เงินสด",
         # เงินทอน
         "เงินทอม":"เงินทอน","เง็นทอน":"เงินทอน",
         # ID
@@ -650,7 +987,7 @@ def clean_text(text: str) -> str:
         # receipt
         "RECEIPI":"RECEIPT",
         # บาท variants ที่ OCR อ่านเป็นอื่น
-        "uw":"บาท","inn":"บาท","inv":"บาท","บนาท":"บาท","น บ นา ท":"บาท","ยบาท":"บาท",
+        "uw":"บาท","inn":"บาท","inv":"บาท","บนาท":"บาท","น บ นา ท":"บาท",
         # comma ทศนิยม — ไม่แทน (parse_price จัดการ)
     }
     for old, new in _FIXES.items():
@@ -670,7 +1007,6 @@ def clean_text(text: str) -> str:
             # colon/space แทนจุด: "39:00" "39 00"
             line = re.sub(r'\b(\d{1,5})\s*[:]\s*(\d{2})\b', r'\1.\2', line)
             line = re.sub(r'\b(\d{1,5})\s+(\d{2})\b(?!\s*\d)', r'\1.\2', line)
-            line = re.sub(r'(\d+\.\d{2})\s*VE', r'\1', line, flags=re.IGNORECASE)
             # ไม่มีจุด ลงท้าย 00: 11000→110.00
             line = re.sub(r'(?<!\d\.)\b(\d{3,6})\b(?!\.\d)',
                 lambda m: (m.group(0)[:-2]+'.'+m.group(0)[-2:]
@@ -753,6 +1089,18 @@ def extract_receipt(text: str) -> dict:
                 prices = _find_prices_in_line(line)
                 if prices and prices[-1] > 0: change = prices[-1]; break
 
+    # fallback สุดท้าย: ถ้าหา "ยอดรวม" ด้วย keyword ทุกแบบไม่เจอเลย
+    # (total ยังเป็น 0 อยู่ทั้งที่ผ่าน 2 รอบ keyword-based ด้านบนแล้ว)
+    # แปลว่า OCR เพี้ยนหนักมากจน keyword ของยอดรวมไม่เหลือเค้าโครงเดิมเลย
+    # ในกรณีนี้ค่า cash/change ที่ "เจอ" จาก keyword อื่นก็อาจสุ่มมั่วได้เช่นกัน
+    # (เช่น keyword ของเงินสดบังเอิญไปจับบรรทัดอื่นที่ไม่ใช่เงินสดจริง)
+    # จึงใช้ตำแหน่งสัมพัทธ์แทนทั้งชุด — ดูคำอธิบายใน _find_amounts_positional()
+    if total == 0.0:
+        positional = _find_amounts_positional(lines)
+        if len(positional) >= 1: total  = positional[0]
+        if len(positional) >= 2: cash   = positional[1]
+        if len(positional) >= 3: change = positional[2]
+
     # --- name (first product line heuristic) ---
     skip_name_kw = ["Total","CASH","Change","Vat","Rcpt","POS","TAX","User",
                     "INCLUDED","RECEIPT","INVOICE","ขอบคุณ",
@@ -783,11 +1131,21 @@ def extract_receipt(text: str) -> dict:
 # Item extractor (CJ) — engine v2 with spaced-line support
 # ─────────────────────────────────────────────────────────────────────────────
 def _fix_spaced_price(s: str) -> str:
+    # "25 00" → "25.00" (ช่องว่างแทนจุดทศนิยม 2 หลัก)
     s = re.sub(r'(?<!\S)(\d+)\s+(\d{2})(?=\s|$)', r'\1.\2', s)
+    # "50 0" → "50.00" (OCR อ่านเลขท้ายตกหายไป 1 หลัก จาก "50.00" เดิม)
+    s = re.sub(r'(?<!\S)(\d+)\s+(\d)(?=\s|$)', r'\1.\g<2>0', s)
     def _dot(m):
         n = m.group(0)
         return (n[:-2]+'.'+n[-2:]) if re.match(r'^\d{3,4}$', n) and n.endswith('00') else n
     return re.sub(r'\b\d{3,4}\b', _dot, s)
+
+def _clean_item_name(nm: str) -> str:
+    """ยุบช่องว่างซ้ำ + ตัดสัญลักษณ์ขยะที่ติดหัว/ท้ายชื่อสินค้า (เช่น !, ", ', |)"""
+    nm = re.sub(r'\s+', ' ', nm).strip()
+    nm = re.sub(r'^[!"\'|！,\-\.]+\s*', '', nm)
+    nm = re.sub(r'\s*[!"\'|！,\-]+$', '', nm)
+    return nm.strip()
 
 def extract_items_cj(text: str) -> list:
     items  = []
@@ -805,10 +1163,14 @@ def extract_items_cj(text: str) -> list:
                "ส่วนลด","แต้ม","ขอบคุณ","สาขา","RECEIPT","INVOICE",
                "สมาชิก","ID:","QR","User"]
 
-    _full = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2}).*?$')
-    _fb_a = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2}).*?$')
-    _fb_b = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2}).*?$')
-    _fb_c = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2}).*?$')
+    # suffix ท้ายบรรทัด: รองรับขยะหลายตัวอักษร/ช่องว่างปนกัน (เช่น "Vt", "บ หู")
+    # ใช้ Unicode range ของอักษรไทยทั้งหมด (\u0E00-\u0E7F) แทนการ list ทีละตัว
+    # เพราะตัวอักษรไทยรวมสระ/วรรณยุกต์มีมากเกินจะ list หมดและพลาดง่าย (เช่น ู, ึ, ์)
+    _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！]*'
+    _full  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_a  = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_b  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_c  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s*$')
 
     for line in lines[start_idx:]:
         line = line.strip()
@@ -817,17 +1179,27 @@ def extract_items_cj(text: str) -> list:
 
         if any(k in line or k in compact for k in stop_kw): break
         if re.search(r'จ.{0,3}นวนส', compact): break
+        # หยุดเมื่อเจอ "เลข+รายการ" (สรุปจำนวนรายการ) แม้คำว่า "จำนวนสินค้า"
+        # ข้างหน้าจะเพี้ยนจน regex ข้างบนจับไม่ได้ก็ตาม — "รายการ" เป็นคำที่ OCR
+        # มักอ่านถูกอยู่เสมอเพราะไม่มีสระ/วรรณยุกต์ซับซ้อนเท่าคำอื่น
+        # รองรับ OCR สับสน ร↔ง ด้วย (เช่น "รายการ" อ่านเป็น "งายการ")
+        if re.search(r'\d\s*[รง]\s*า\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
         if re.search(r'-\s*\d+[.,]\d{2}', line): continue   # ส่วนลด (ติดลบ)
         if len(line) < 5: continue
 
-        lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$','',line).strip())
+        # ตัดอักขระขยะที่ติดหัว/ท้ายบรรทัดออกก่อน (เช่น ". [", "> ]", "es ", '"')
+        # OCR มักใส่สัญลักษณ์แปลกปลอมไว้ต้นบรรทัดแทนเลขจำนวนที่อ่านไม่ออก
+        line_stripped = re.sub(r'^[.\[\]>"\'`*es]+\s*', '', line.strip())
+        if not line_stripped: line_stripped = line.strip()
+
+        lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$','',line_stripped).strip())
 
         m = _full.match(lf)
         if m:
             qty, nm, up, tp = m.groups()
-            nm = re.sub(r'\s+',' ',nm).strip()
+            nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',nm)) >= 2:
                 u=parse_price(up); tt=parse_price(tp); q=int(qty)
                 if tt < u*0.5: tt = round(u*q,2)
@@ -837,7 +1209,7 @@ def extract_items_cj(text: str) -> list:
         m = _fb_a.match(lf)
         if m:
             nm, up, tp = m.groups()
-            nm = re.sub(r'\s+',' ',nm).strip()
+            nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',nm)) >= 2:
                 items.append({"ชื่อสินค้า":nm,"จำนวน":1,
                               "ราคาต่อหน่วย":parse_price(up),"ยอดรวมสินค้า":parse_price(tp)})
@@ -846,7 +1218,7 @@ def extract_items_cj(text: str) -> list:
         m = _fb_b.match(lf)
         if m:
             qty, nm, price = m.groups()
-            nm = re.sub(r'\s+',' ',nm).strip()
+            nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',nm)) >= 2:
                 p = parse_price(price)
                 items.append({"ชื่อสินค้า":nm,"จำนวน":int(qty),"ราคาต่อหน่วย":p,"ยอดรวมสินค้า":p})
@@ -856,7 +1228,7 @@ def extract_items_cj(text: str) -> list:
         if m:
             qty, nm, price = m.groups()
             nm = re.sub(r'\s+[0-9]+[.,][0-9]{2}\s*',' ',nm)
-            nm = re.sub(r'\s+',' ',nm).strip()
+            nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z]','',nm)) >= 3:
                 p = parse_price(price)
                 items.append({"ชื่อสินค้า":nm,"จำนวน":int(qty),"ราคาต่อหน่วย":p,"ยอดรวมสินค้า":p})
@@ -1196,10 +1568,14 @@ document.getElementById('btn-reset').onclick = () => {{
 # ─────────────────────────────────────────────────────────────────────────────
 # Batch mode: ประมวลผลหลายไฟล์พร้อมกัน (1 ไฟล์ = 1 บิล)
 # ─────────────────────────────────────────────────────────────────────────────
-def run_batch_analysis(files: list, progress_cb=None) -> list:
+def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = False,
+                        ocr_engine: str = "tesseract") -> list:
     """
     files: list of (filename, bytes)
     progress_cb: callable(i, n, filename) เรียกก่อนประมวลผลแต่ละไฟล์ (สำหรับแสดง progress)
+    auto_detect_multi: ถ้า True จะพยายามตรวจจับว่าภาพหนึ่งมีหลายใบเสร็จไหม
+        (เช่น ถ่ายบนโต๊ะรวมหลายใบ) แล้วแยกประมวลผลเป็นบิลละรายการอัตโนมัติ
+        พร้อมทำพื้นหลังขาวให้ก่อน OCR เพื่อความแม่นยำที่ดีขึ้น
     คืนค่า: list of bill dicts พร้อม OCR แล้ว (รูปแบบเดียวกับ S.all_bills)
     """
     results = []
@@ -1209,11 +1585,26 @@ def run_batch_analysis(files: list, progress_cb=None) -> list:
         try:
             pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
             img_cv = pil_to_cv(pil)
-            text  = run_ocr(img_cv)
-            bill  = extract_receipt(text)
-            items = extract_items_cj(text)
-            results.append({"filename": fname, "bill": bill, "items": items,
-                            "raw_text": text, "image": img_to_bytes_png(img_cv)})
+
+            if auto_detect_multi:
+                sub_crops = auto_crop_receipts(img_cv)
+            else:
+                sub_crops = [img_cv]
+
+            if len(sub_crops) == 1:
+                text  = run_ocr(sub_crops[0], engine=ocr_engine)
+                bill  = extract_receipt(text)
+                items = extract_items_cj(text)
+                results.append({"filename": fname, "bill": bill, "items": items,
+                                "raw_text": text, "image": img_to_bytes_png(sub_crops[0])})
+            else:
+                for ci, crop in enumerate(sub_crops, 1):
+                    label = f"{fname} — บิล {ci}"
+                    text  = run_ocr(crop, engine=ocr_engine)
+                    bill  = extract_receipt(text)
+                    items = extract_items_cj(text)
+                    results.append({"filename": label, "bill": bill, "items": items,
+                                    "raw_text": text, "image": img_to_bytes_png(crop)})
         except Exception as e:
             results.append({"filename": fname,
                             "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
@@ -1267,6 +1658,57 @@ def run_batch_mode_ui():
 
     st.divider()
 
+    auto_detect = st.checkbox(
+        "🪄 ตรวจจับหลายใบเสร็จในภาพเดียวอัตโนมัติ + ทำพื้นหลังขาว"
+        if S.lang=="th" else
+        "🪄 Auto-detect multiple receipts per image + whiten background",
+        value=False, key="batch_auto_detect",
+        help="เปิดใช้เมื่อถ่ายภาพหลายใบเสร็จรวมกัน (เช่น วางบนโต๊ะ) "
+             "ระบบจะครอปแยกแต่ละใบและลบพื้นหลัง/เงาออกให้อัตโนมัติ ช่วยให้ OCR แม่นขึ้น"
+             if S.lang=="th" else
+             "Enable when a photo contains multiple receipts together (e.g. laid out "
+             "on a table). The app will auto-crop each one and remove background/shadow "
+             "to improve OCR accuracy.")
+
+    # ── พรีวิวผลการตัด/แก้ไขภาพ ก่อนกดวิเคราะห์ ──
+    # ให้เห็นว่าระบบครอป/แก้มุมเอียง/ลบพื้นหลังถูกต้องไหม ก่อนเสียเวลา OCR จริง
+    if auto_detect and S.batch_files:
+        st.markdown("**👁️ พรีวิวผลการตัด/แก้ไขภาพ**" if S.lang=="th"
+                     else "**👁️ Preview of cropped/corrected images**")
+        preview_n = min(len(S.batch_files), 3)
+        st.caption(f"แสดงตัวอย่าง {preview_n} จาก {len(S.batch_files)} ไฟล์แรก"
+                   if S.lang=="th" else
+                   f"Showing {preview_n} of the first {len(S.batch_files)} files")
+
+        for fname, fbytes in S.batch_files[:preview_n]:
+            try:
+                pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
+                img_cv = pil_to_cv(pil)
+                sub_crops = auto_crop_receipts(img_cv)
+            except Exception as e:
+                st.warning(f"⚠️ {fname}: {e}")
+                continue
+
+            st.markdown(f"📄 **{fname}**")
+            pc1, pc2 = st.columns([1, 2])
+            with pc1:
+                st.image(pil, use_container_width=True,
+                         caption="ต้นฉบับ" if S.lang=="th" else "Original")
+            with pc2:
+                if len(sub_crops) <= 1:
+                    st.image(cv_to_pil(sub_crops[0]), use_container_width=True,
+                             caption="หลังแก้ไข (พบ 1 บิล)" if S.lang=="th"
+                                     else "After correction (1 receipt found)")
+                else:
+                    st.caption(f"พบ {len(sub_crops)} บิลในภาพนี้" if S.lang=="th"
+                               else f"Found {len(sub_crops)} receipts in this image")
+                    sub_cols = st.columns(min(len(sub_crops), 3))
+                    for si, sc in enumerate(sub_crops):
+                        with sub_cols[si % len(sub_cols)]:
+                            st.image(cv_to_pil(sc), use_container_width=True,
+                                     caption=f"บิล {si+1}" if S.lang=="th" else f"Receipt {si+1}")
+            st.markdown("---")
+
     bc1, bc2 = st.columns([3,1])
     with bc1:
         run_clicked = st.button(t("batch_analyze"), use_container_width=True, type="primary")
@@ -1280,7 +1722,8 @@ def run_batch_mode_ui():
         progress_bar = st.progress(0, text=t("batch_progress")(0, len(S.batch_files), ""))
         def _cb(i, n, fname):
             progress_bar.progress(i / n, text=t("batch_progress")(i, n, fname))
-        results = run_batch_analysis(S.batch_files, progress_cb=_cb)
+        results = run_batch_analysis(S.batch_files, progress_cb=_cb, auto_detect_multi=auto_detect,
+                                      ocr_engine=S.ocr_engine)
         progress_bar.progress(1.0, text=t("batch_done")(len(results)))
         S.all_bills = results
         st.rerun()
@@ -1303,9 +1746,15 @@ def run_batch_mode_ui():
                     d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",   d['pos_id'],  key=f"bps{idx}")
                     d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ",  d['rcpt_no'], key=f"brc{idx}")
                     r2 = st.columns(3)
-                    d['total_amount'] = r2[0].number_input("ยอดรวม",  float(d['total_amount']), step=0.01, format="%.2f", key=f"btot{idx}")
-                    d['cash']         = r2[1].number_input("เงินสด",  float(d['cash']),         step=0.01, format="%.2f", key=f"bcsh{idx}")
-                    d['change']       = r2[2].number_input("เงินทอน", float(d['change']),        step=0.01, format="%.2f", key=f"bchg{idx}")
+                    # ใช้ text_input แทน number_input สำหรับยอดเงิน — เพราะ <input type="number">
+                    # ของ HTML บางครั้งค้างค่า min/max จาก render ก่อนหน้าไว้ใน browser
+                    # ทำให้พิมพ์แก้ค่าใหม่ไม่ได้ (โดยเฉพาะเมื่อ OCR ค่าเดิมสูงผิดปกติ)
+                    tot_str = r2[0].text_input("ยอดรวม",  f"{float(d['total_amount']):.2f}", key=f"btot{idx}")
+                    csh_str = r2[1].text_input("เงินสด",  f"{float(d['cash']):.2f}",         key=f"bcsh{idx}")
+                    chg_str = r2[2].text_input("เงินทอน", f"{float(d['change']):.2f}",        key=f"bchg{idx}")
+                    d['total_amount'] = parse_price(tot_str)
+                    d['cash']         = parse_price(csh_str)
+                    d['change']       = parse_price(chg_str)
 
                 mc = st.columns(3)
                 mc[0].metric("💰 ยอดรวม",  f"{d['total_amount']:.2f} ฿")
@@ -1341,6 +1790,61 @@ def main():
                       index=0 if S.lang=="th" else 1)
         nl = "th" if lc=="ไทย" else "en"
         if nl != S.lang: S.lang = nl; st.rerun()
+
+    # ── เลือก OCR Engine ─────────────────────────────────────────────────
+    with st.expander(
+        "⚙️ ตัวเลือก OCR Engine" if S.lang=="th" else "⚙️ OCR Engine options",
+        expanded=False
+    ):
+        vision_ready = is_vision_api_configured()
+        engine_options = (
+            ["🆓 Tesseract (ฟรี, รันในเครื่อง)", "🎯 Google Cloud Vision API (แม่นกว่ามาก)"]
+            if S.lang == "th" else
+            ["🆓 Tesseract (free, local)", "🎯 Google Cloud Vision API (much more accurate)"]
+        )
+        current_idx = 1 if S.ocr_engine == "vision" else 0
+        choice = st.radio(
+            "เลือก OCR Engine" if S.lang=="th" else "Choose OCR Engine",
+            engine_options, index=current_idx, key="ocr_engine_radio",
+            label_visibility="collapsed",
+        )
+        new_engine = "vision" if engine_options.index(choice) == 1 else "tesseract"
+        if new_engine != S.ocr_engine:
+            S.ocr_engine = new_engine
+
+        if S.ocr_engine == "vision":
+            if vision_ready:
+                st.success(
+                    "✅ ตั้งค่า Google Vision API key แล้ว — พร้อมใช้งาน "
+                    "(ฟรี 1,000 ภาพแรกของทุกเดือน เกินจากนั้นมีค่าใช้จ่ายเล็กน้อย)"
+                    if S.lang=="th" else
+                    "✅ Google Vision API key configured — ready to use "
+                    "(free for first 1,000 images/month, small cost after that)"
+                )
+            else:
+                st.warning(
+                    "⚠️ ยังไม่ได้ตั้งค่า API key — ระบบจะใช้ Tesseract แทนโดยอัตโนมัติ\n\n"
+                    "วิธีตั้งค่า: เปิดใช้งาน Cloud Vision API ที่ Google Cloud Console "
+                    "แล้วตั้งค่า environment variable `GOOGLE_VISION_API_KEY` "
+                    "ก่อนรันแอป (ดูรายละเอียดในคอมเมนต์เหนือฟังก์ชัน "
+                    "`run_ocr_google_vision` ในโค้ด)"
+                    if S.lang=="th" else
+                    "⚠️ API key not configured yet — will automatically fall back "
+                    "to Tesseract\n\nSetup: enable Cloud Vision API in Google Cloud "
+                    "Console, then set the `GOOGLE_VISION_API_KEY` environment "
+                    "variable before running the app (see comment above the "
+                    "`run_ocr_google_vision` function in the code)"
+                )
+        else:
+            st.caption(
+                "💡 Tesseract ฟรีและรันในเครื่องทั้งหมด แต่แม่นน้อยกว่า Google Vision "
+                "โดยเฉพาะกับภาพที่เอียง/เงา/ยับมาก ลองสลับไปใช้ Google Vision "
+                "ถ้าผลลัพธ์ยังไม่แม่นพอ"
+                if S.lang=="th" else
+                "💡 Tesseract is free and fully local, but less accurate than "
+                "Google Vision, especially on tilted/shadowed/wrinkled photos. "
+                "Try switching to Google Vision if results aren't accurate enough."
+            )
 
     # ── เลือกโหมดการอัปโหลด ──────────────────────────────────────────────
     st.markdown(f'<p class="sec-header">{t("mode_label")}</p>', unsafe_allow_html=True)
@@ -1551,7 +2055,7 @@ def main():
         with prev_c:
             st.image(working_pil, caption="รูปที่จะวิเคราะห์", use_container_width=True)
 
-            # ── แสดงตัวอย่างการแบ่งบิลก่อนกด OCR (ถ้ามีหลายบิล) ──
+            # ── แสดงตัวอย่างการแบ่งบิล + ผลแก้ไขภาพ (deskew/ลบพื้นหลัง/แก้แสงเงา) ก่อนกด OCR ──
             if S.bill_count > 1:
                 img_cv_preview = pil_to_cv(working_pil)
                 if S.manual_splits_px:
@@ -1560,10 +2064,26 @@ def main():
                 else:
                     preview_crops = split_receipts_image(img_cv_preview, n_expected=S.bill_count)
                     st.caption(f"🤖 ระบบตรวจจับอัตโนมัติ → แยกได้ {len(preview_crops)} บิล")
+                st.caption("👁️ ภาพด้านล่างคือผลหลังตัด/ลบพื้นหลัง/แก้แสงเงา (ภาพจริงที่จะใช้วิเคราะห์)"
+                           if S.lang=="th" else
+                           "👁️ Images below show the result after crop/background removal/"
+                           "lighting correction (the actual images used for analysis)")
                 pc = st.columns(min(len(preview_crops), 3))
                 for i, crop in enumerate(preview_crops[:3]):
                     with pc[i % len(pc)]:
-                        st.image(cv_to_pil(crop), caption=f"บิล {i+1}", use_container_width=True)
+                        corrected_preview = whiten_background(crop)
+                        st.image(corrected_preview, caption=f"บิล {i+1}", use_container_width=True)
+            else:
+                # บิลเดี่ยว: แสดงผลหลังแก้ไขด้วย เผื่อภาพมีเงา/เอียง/พื้นหลังไม่ขาว
+                img_cv_preview = pil_to_cv(working_pil)
+                results_preview, _ = find_paper_contours(img_cv_preview)
+                if results_preview:
+                    st.caption("👁️ ภาพหลังแก้ไข (ตัด/แก้มุมเอียง/ลบพื้นหลัง/แก้แสงเงา)"
+                               if S.lang=="th" else
+                               "👁️ Corrected image (crop/deskew/background removal/lighting fix)")
+                    bbox0, contour0 = results_preview[0]
+                    corrected_single = whiten_background(img_cv_preview, contour=contour0, bbox=bbox0)
+                    st.image(corrected_single, use_container_width=True)
 
         with ocr_c:
             if S.bill_count > 1:
@@ -1591,7 +2111,7 @@ def main():
                              if 0 <= S.selected_idx < len(S.gallery_files) else "image")
                     for ci, crop in enumerate(crops):
                         label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
-                        text  = run_ocr(crop)
+                        text  = run_ocr(crop, engine=S.ocr_engine)
                         bill  = extract_receipt(text)
                         items = extract_items_cj(text)
                         all_bills.append({"filename":label,"bill":bill,"items":items,
@@ -1615,9 +2135,14 @@ def main():
                     d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",   d['pos_id'],  key=f"ps{idx}")
                     d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ",  d['rcpt_no'], key=f"rc{idx}")
                     r2 = st.columns(3)
-                    d['total_amount'] = r2[0].number_input("ยอดรวม",  float(d['total_amount']), step=0.01, format="%.2f", key=f"tot{idx}")
-                    d['cash']         = r2[1].number_input("เงินสด",  float(d['cash']),         step=0.01, format="%.2f", key=f"csh{idx}")
-                    d['change']       = r2[2].number_input("เงินทอน", float(d['change']),        step=0.01, format="%.2f", key=f"chg{idx}")
+                    # ใช้ text_input แทน number_input — กัน browser ค้างค่า min/max
+                    # จาก state ก่อนหน้า ทำให้พิมพ์แก้ยอดเงินใหม่ไม่ได้
+                    tot_str = r2[0].text_input("ยอดรวม",  f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
+                    csh_str = r2[1].text_input("เงินสด",  f"{float(d['cash']):.2f}",         key=f"csh{idx}")
+                    chg_str = r2[2].text_input("เงินทอน", f"{float(d['change']):.2f}",        key=f"chg{idx}")
+                    d['total_amount'] = parse_price(tot_str)
+                    d['cash']         = parse_price(csh_str)
+                    d['change']       = parse_price(chg_str)
 
                 mc = st.columns(3)
                 mc[0].metric("💰 ยอดรวม",  f"{d['total_amount']:.2f} ฿")

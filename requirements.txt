@@ -1,8 +1,10 @@
 streamlit
-pytesseract
-opencv-python-headless
 pillow
+pytesseract
 pandas
-openpyxl
+opencv-python-headless
 numpy
+openpyxl
+google-api-python-client
+google-auth
 requests

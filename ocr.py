@@ -511,7 +511,7 @@ def split_by_positions(img_cv, split_px_list):
 # เป็น 1 หน่วยต่อภาพ) เกินจากนั้นคิดราคาถูกมาก ดูราคาล่าสุดที่
 # https://cloud.google.com/vision/pricing
 # ─────────────────────────────────────────────────────────────────────────────
-_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "")  # หรือใส่คีย์ตรงๆ ในเครื่องหมาย "" นี้
+_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "AQ.Ab8RN6KP-bl4Z5o7v42NYu0CQgCf__Wzrpyx1vjvz_xcN8ttHQ")  # หรือใส่คีย์ตรงๆ ในเครื่องหมาย "" นี้
 
 def is_vision_api_configured() -> bool:
     """เช็คว่าตั้งค่า Google Vision API key ไว้แล้วหรือยัง"""

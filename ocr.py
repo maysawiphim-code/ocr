@@ -1245,17 +1245,26 @@ def _clean_item_name(nm: str) -> str:
 
 def _merge_gdrive_lines(lines: list) -> list:
     """
-    Google Drive OCR มักแยกราคาออกเป็นบรรทัดใหม่ เช่น:
+    Google Drive OCR มักแยกราคาออกเป็นบรรทัดใหม่ และมีบรรทัด V เดี่ยวๆ เช่น:
         1 คาราบาวกรินแอปเปิ้ล18
         15.00
         15.00 V
+        V
     → รวมเป็น: "1 คาราบาวกรินแอปเปิ้ล18 15.00 15.00"
 
-    หลักการ: ถ้าบรรทัดปัจจุบันมีแค่ตัวเลข/ราคา (ไม่มีข้อความไทย/อังกฤษ)
-    และบรรทัดก่อนหน้าเป็นชื่อสินค้า → รวมเข้าด้วยกัน
+    นอกจากนี้ยังรวม keyword+ราคาที่แยกบรรทัด เช่น:
+        ยอดรวม
+        88.00 บาท
+    → "ยอดรวม 88.00 บาท"
     """
+    # บรรทัดที่เป็นแค่ราคา/V/ช่องว่าง
     _price_only = re.compile(r'^[\d.,\s]+[Vv]?\s*$')
-    _has_text   = re.compile(r'[ก-๙a-zA-Z]')
+    _v_only     = re.compile(r'^[Vv]\s*$')           # บรรทัด V เดี่ยวๆ
+    _has_thai   = re.compile(r'[ก-๙]')
+    _kw_amount  = re.compile(r'ยอดรวม|เงินสด|เงินทอน|รวมทั้งสิ้น', re.IGNORECASE)
+
+    # pass 1: กรองบรรทัด V เดี่ยวๆ ออก
+    lines = [l for l in lines if not _v_only.match(l.strip())]
 
     merged = []
     i = 0
@@ -1266,8 +1275,19 @@ def _merge_gdrive_lines(lines: list) -> list:
             i += 1
             continue
 
-        # ถ้าบรรทัดนี้มีข้อความ (ชื่อสินค้า) ให้ดูว่าบรรทัดถัดไปเป็นราคาล้วนไหม
-        if _has_text.search(line) and re.match(r'^\d+\s+\S', line):
+        # ── รวม keyword ยอดรวม/เงินสด/เงินทอน กับราคาบรรทัดถัดไป ──
+        if _kw_amount.search(line) and not _RE_PRICE.search(line):
+            j = i + 1
+            if j < len(lines):
+                next_line = lines[j].strip()
+                price_m = _RE_PRICE.search(next_line)
+                if price_m:
+                    merged.append(line + " " + next_line)
+                    i = j + 1
+                    continue
+
+        # ── รวมชื่อสินค้า (ขึ้นต้นด้วยเลข) กับราคาบรรทัดถัดไป ──
+        if re.match(r'^\d+\s+\S', line) and _has_thai.search(line):
             combined = line
             j = i + 1
             price_count = 0
@@ -1275,7 +1295,6 @@ def _merge_gdrive_lines(lines: list) -> list:
                 next_line = lines[j].strip()
                 if not next_line:
                     break
-                # บรรทัดถัดไปเป็นราคาล้วน (เช่น "15.00" หรือ "15.00 V")
                 if _price_only.match(next_line):
                     price_part = re.sub(r'\s*[Vv]\s*$', '', next_line).strip()
                     if price_part:

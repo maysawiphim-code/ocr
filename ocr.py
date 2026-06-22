@@ -1243,9 +1243,64 @@ def _clean_item_name(nm: str) -> str:
     return nm.strip()
 
 
+def _merge_gdrive_lines(lines: list) -> list:
+    """
+    Google Drive OCR มักแยกราคาออกเป็นบรรทัดใหม่ เช่น:
+        1 คาราบาวกรินแอปเปิ้ล18
+        15.00
+        15.00 V
+    → รวมเป็น: "1 คาราบาวกรินแอปเปิ้ล18 15.00 15.00"
+
+    หลักการ: ถ้าบรรทัดปัจจุบันมีแค่ตัวเลข/ราคา (ไม่มีข้อความไทย/อังกฤษ)
+    และบรรทัดก่อนหน้าเป็นชื่อสินค้า → รวมเข้าด้วยกัน
+    """
+    _price_only = re.compile(r'^[\d.,\s]+[Vv]?\s*$')
+    _has_text   = re.compile(r'[ก-๙a-zA-Z]')
+
+    merged = []
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            merged.append(line)
+            i += 1
+            continue
+
+        # ถ้าบรรทัดนี้มีข้อความ (ชื่อสินค้า) ให้ดูว่าบรรทัดถัดไปเป็นราคาล้วนไหม
+        if _has_text.search(line) and re.match(r'^\d+\s+\S', line):
+            combined = line
+            j = i + 1
+            price_count = 0
+            while j < len(lines) and price_count < 2:
+                next_line = lines[j].strip()
+                if not next_line:
+                    break
+                # บรรทัดถัดไปเป็นราคาล้วน (เช่น "15.00" หรือ "15.00 V")
+                if _price_only.match(next_line):
+                    price_part = re.sub(r'\s*[Vv]\s*$', '', next_line).strip()
+                    if price_part:
+                        combined += " " + price_part
+                    price_count += 1
+                    j += 1
+                else:
+                    break
+            if price_count > 0:
+                merged.append(combined)
+                i = j
+                continue
+
+        merged.append(line)
+        i += 1
+    return merged
+
+
 def extract_items_cj(text: str) -> list:
     items  = []
     lines  = text.split('\n')
+
+    # รวมบรรทัดที่ Google Drive OCR แยกราคาออกเป็นบรรทัดใหม่
+    lines = _merge_gdrive_lines(lines)
+
     start_idx = 0
     _DATE_RE2 = re.compile(r'\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}')
     for idx, line in enumerate(lines):

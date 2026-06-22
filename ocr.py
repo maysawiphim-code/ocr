@@ -634,7 +634,9 @@ def run_ocr_google_drive(crop_cv) -> str:
             timeout=30,
         )
         export_resp.raise_for_status()
-        raw_text = export_resp.text
+        # บังคับ decode เป็น UTF-8 เสมอ (Google Drive export ส่งมาเป็น UTF-8)
+        # ถ้าไม่ระบุ requests จะเดา encoding เองและมักผิดสำหรับภาษาไทย
+        raw_text = export_resp.content.decode("utf-8")
     finally:
         # ลบไฟล์ทันที
         try:

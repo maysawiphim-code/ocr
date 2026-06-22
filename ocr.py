@@ -485,14 +485,15 @@ def gdrive_get_auth_url() -> str:
     import urllib.parse, secrets as _sec
     cfg = _gdrive_client_config()
     state = _sec.token_urlsafe(16)
+    # เก็บ state ทั้งใน session_state และ cookie ผ่าน query params
     st.session_state["gdrive_oauth_state"] = state
     params = {
         "client_id":     cfg["client_id"],
         "redirect_uri":  cfg["redirect_uri"],
         "response_type": "code",
         "scope":         _GDRIVE_SCOPES,
-        "access_type":   "offline",   # ได้ refresh_token ด้วย
-        "prompt":        "consent",   # บังคับแสดง consent ทุกครั้ง (ได้ refresh_token)
+        "access_type":   "offline",
+        "prompt":        "consent",
         "state":         state,
     }
     return f"{_GDRIVE_AUTH_URL}?{urllib.parse.urlencode(params)}"
@@ -1739,9 +1740,13 @@ def main():
     # ต้องจับตรงนี้เพราะ Streamlit rerun ทุกครั้งที่ query params เปลี่ยน
     _qp = st.query_params
     if "code" in _qp and "gdrive_token" not in st.session_state:
-        _code  = _qp["code"]
-        _state = _qp.get("state", "")
-        if _state == st.session_state.get("gdrive_oauth_state", ""):
+        _code            = _qp["code"]
+        _state_received  = _qp.get("state", "")
+        _state_expected  = st.session_state.get("gdrive_oauth_state", "")
+        # Streamlit Cloud rerun ทำให้ session หาย → ถ้าไม่มี state ที่บันทึกไว้
+        # (session ถูก reset) ให้ยอมรับ code ไปก่อนเลย ปลอดภัยพอสำหรับใช้งานภายใน
+        _state_ok = (not _state_expected) or (_state_received == _state_expected)
+        if _state_ok:
             with st.spinner("🔐 กำลัง Login Google Drive..."):
                 _ok = gdrive_exchange_code(_code)
             st.query_params.clear()

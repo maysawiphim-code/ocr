@@ -890,17 +890,30 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def extract_with_gemini(raw_text: str) -> dict:
+def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
     """
-    ใช้ Gemini วิเคราะห์ raw text จากบิล CJ Express ครบทั้งใบ:
-    - รายการสินค้าทุกรายการ
-    - ยอดรวม เงินสด เงินทอน
-    - วันที่ เวลา สาขา เลขที่ใบเสร็จ
-    คืนค่า dict ที่มี "bill" และ "items" (รูปแบบเดียวกับ extract_receipt + extract_items_cj)
+    ใช้ Gemini วิเคราะห์ raw text จากบิล CJ Express ครบทั้งใบ
+    ocr_source: "gdrive" หรือ "tesseract"/"vision"
+    - gdrive: ราคาแยกบรรทัด (ชื่อ → ราคาต่อหน่วย → ราคารวม V)
+    - tesseract/vision: ราคาอยู่บรรทัดเดียวกับชื่อสินค้า
     """
+    if ocr_source == "gdrive":
+        format_hint = """รูปแบบข้อมูล (แต่ละสินค้ามี 3 บรรทัด):
+- บรรทัด 1: จำนวน ชื่อสินค้า  (เช่น "1 คาราบาวแดง" หรือ "- M&M ช็อกโกแลต")
+- บรรทัด 2: ราคาต่อหน่วย  (เช่น "12.00")
+- บรรทัด 3: ราคารวม V  (เช่น "12.00 V" หรือ "24.00 V")
+หมายเหตุ: "-" หน้าชื่อสินค้าหมายถึงจำนวน 1"""
+    else:
+        format_hint = """รูปแบบข้อมูล (แต่ละสินค้าอยู่บรรทัดเดียว):
+- รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม  (เช่น "1 คาราบาวแดง 12.00 12.00")
+- หรือ: จำนวน ชื่อสินค้า ราคา  (เช่น "2 น้ำดื่ม 10.00 20.00")
+- OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด"""
+
     prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
 
 {raw_text}
+
+{format_hint}
 
 กรุณาวิเคราะห์และดึงข้อมูลทั้งหมดออกมาเป็น JSON ตามรูปแบบนี้เท่านั้น ไม่ต้องมีข้อความอื่น:
 {{
@@ -924,8 +937,6 @@ def extract_with_gemini(raw_text: str) -> dict:
 
 กฎสำคัญ:
 - items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม
-- แต่ละสินค้ามี 3 บรรทัด: ชื่อ → ราคาต่อหน่วย → ราคารวม V
-- จำนวน: ตัวเลขหรือ "-" หน้าชื่อสินค้า (ถ้าเป็น "-" ให้ใส่ 1)
 - total_amount: ยอดรวมหลังหักส่วนลด
 - cash: เงินที่จ่าย (เงินสด/QR)
 - change: เงินทอน
@@ -933,11 +944,9 @@ def extract_with_gemini(raw_text: str) -> dict:
 
     try:
         text_out = _call_gemini(prompt)
-        # ล้าง markdown code block
         text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
         data = json.loads(text_out)
 
-        # normalize bill fields
         bill = {
             "date":         str(data.get("date", "ไม่พบ")),
             "time":         str(data.get("time", "ไม่พบ")),
@@ -952,7 +961,6 @@ def extract_with_gemini(raw_text: str) -> dict:
             "name":         "ไม่พบ",
         }
 
-        # normalize items
         items = []
         for it in data.get("items", []):
             items.append({
@@ -1952,11 +1960,14 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                 sub_crops = [img_cv]
             if len(sub_crops) == 1:
                 st.session_state["_gdrive_raw_texts"] = []
-                text      = run_ocr(sub_crops[0], engine=ocr_engine)
+                text       = run_ocr(sub_crops[0], engine=ocr_engine)
                 gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                raw_for_ai = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else ""
-                if raw_for_ai and is_gemini_configured():
-                    gr = extract_with_gemini(raw_for_ai)
+                text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
+                if is_gemini_configured() and text_for_gemini.strip():
+                    gr    = extract_with_gemini(
+                        text_for_gemini,
+                        ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract"
+                    )
                     bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                     items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                 else:
@@ -1969,11 +1980,14 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                 for ci, crop in enumerate(sub_crops, 1):
                     label = f"{fname} — บิล {ci}"
                     st.session_state["_gdrive_raw_texts"] = []
-                    text      = run_ocr(crop, engine=ocr_engine)
+                    text       = run_ocr(crop, engine=ocr_engine)
                     gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                    raw_for_ai = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else ""
-                    if raw_for_ai and is_gemini_configured():
-                        gr = extract_with_gemini(raw_for_ai)
+                    text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
+                    if is_gemini_configured() and text_for_gemini.strip():
+                        gr    = extract_with_gemini(
+                            text_for_gemini,
+                            ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract"
+                        )
                         bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                         items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                     else:
@@ -2186,27 +2200,26 @@ def main():
                 "**Google Vision API** ถ้าผลยังไม่แม่นพอ"
             )
 
-        # ── Gemini API status ──
+        # ── Gemini API status — แสดงสำหรับทุก engine ──
         gemini_ready = is_gemini_configured()
-        if S.ocr_engine == "gdrive":
-            st.divider()
-            st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text**")
-            if gemini_ready:
-                st.success(
-                    "✅ ตั้งค่า Gemini API key แล้ว\n\n"
-                    "Google Drive OCR อ่านข้อความ → Gemini วิเคราะห์รายการสินค้า+ยอดเงิน\n"
-                    "ฟรี 1,500 requests/วัน (Gemini 2.0 Flash)"
-                )
-            else:
-                st.info(
-                    "💡 เพิ่ม Gemini API เพื่อวิเคราะห์บิลแม่นขึ้น (ฟรี 1,500 requests/วัน)\n\n"
-                    "1. ไปที่ https://aistudio.google.com/app/apikey → **Create API key**\n"
-                    "2. ใส่ใน `.streamlit/secrets.toml`:\n"
-                    "```toml\n"
-                    'GEMINI_API_KEY = "AIzaSy..."\n'
-                    "```\n"
-                    "ถ้าไม่ตั้งค่า แอปจะใช้ regex parser แทน (แม่นน้อยกว่า)"
-                )
+        st.divider()
+        st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text (ใช้กับทุก OCR Engine)**")
+        if gemini_ready:
+            st.success(
+                "✅ ตั้งค่า Gemini API key แล้ว\n\n"
+                "ทุก OCR engine จะส่ง text ให้ Gemini วิเคราะห์รายการสินค้า+ยอดเงินอัตโนมัติ\n"
+                "ฟรี 1,500 requests/วัน (Gemini 2.0 Flash)"
+            )
+        else:
+            st.info(
+                "💡 เพิ่ม Gemini API เพื่อวิเคราะห์บิลแม่นขึ้น (ฟรี 1,500 requests/วัน)\n\n"
+                "1. ไปที่ https://aistudio.google.com/app/apikey → **Create API key**\n"
+                "2. ใส่ใน `.streamlit/secrets.toml`:\n"
+                "```toml\n"
+                'GEMINI_API_KEY = "AIzaSy..."\n'
+                "```\n"
+                "ถ้าไม่ตั้งค่า แอปจะใช้ regex parser แทน (แม่นน้อยกว่า)"
+            )
 
         # ── ตาราง comparison ──
         with st.expander("📊 เปรียบเทียบ OCR Engine ทั้ง 3 แบบ"):
@@ -2437,19 +2450,26 @@ def main():
                         )
                         # reset list ก่อนแต่ละบิล เพื่อให้จับ raw text ของบิลนี้
                         st.session_state["_gdrive_raw_texts"] = []
-                        text      = run_ocr(crop, engine=S.ocr_engine)
+                        text       = run_ocr(crop, engine=S.ocr_engine)
                         gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
 
                         # ── ดึงข้อมูลบิล ──
-                        # ถ้าใช้ Google Drive OCR + Gemini → วิเคราะห์ครบทั้งใบในครั้งเดียว
-                        # (ทั้ง items และ bill fields: วันที่ ยอดรวม เงินสด เงินทอน)
-                        raw_for_ai = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else ""
-                        if raw_for_ai and is_gemini_configured():
+                        # ถ้ามี Gemini key → ส่ง text ให้ Gemini วิเคราะห์เสมอ
+                        # (ไม่ว่าจะใช้ OCR engine ไหน)
+                        # Gemini จะได้ raw text ที่สะอาดที่สุดเท่าที่มี:
+                        # - gdrive: ใช้ raw text จาก Google Doc (สะอาดสุด)
+                        # - tesseract/vision: ใช้ cleaned text แทน
+                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+
+                        if is_gemini_configured() and text_for_gemini.strip():
                             progress.progress(
                                 (ci + 0.5) / len(crops),
                                 text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}..."
                             )
-                            gemini_result = extract_with_gemini(raw_for_ai)
+                            gemini_result = extract_with_gemini(
+                                text_for_gemini,
+                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract"
+                            )
                             if gemini_result["ok"] and gemini_result["items"]:
                                 bill  = gemini_result["bill"]
                                 items = gemini_result["items"]

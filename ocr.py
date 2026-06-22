@@ -845,9 +845,63 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
         return f"[OCR ERROR] {e}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Text parsing engine
-# ─────────────────────────────────────────────────────────────────────────────
+def extract_items_with_claude(raw_text: str) -> list:
+    """
+    ใช้ Claude API วิเคราะห์ข้อความจากบิลแทน regex parser
+    แม่นกว่ามากเพราะ Claude เข้าใจบริบทและรูปแบบที่หลากหลาย
+    คืนค่า list ของ dict เหมือนกับ extract_items_cj
+    """
+    import requests as _req
+
+    prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
+
+{raw_text}
+
+กรุณาดึงรายการสินค้าออกมาให้ครบทุกรายการ (ไม่รวมโปรโมชั่น/ส่วนลด)
+ตอบเป็น JSON array เท่านั้น ไม่ต้องมีข้อความอื่น รูปแบบ:
+[
+  {{"ชื่อสินค้า": "ชื่อ", "จำนวน": 1, "ราคาต่อหน่วย": 0.0, "ยอดรวมสินค้า": 0.0}},
+  ...
+]
+
+กฎ:
+- ชื่อสินค้า: ใช้ชื่อที่อ่านได้จาก OCR (แม้จะสั้นหรือไม่สมบูรณ์)
+- จำนวน: ตัวเลขหน้าชื่อสินค้า (ถ้าไม่มีให้ใส่ 1)
+- ราคาต่อหน่วย: ราคาแรกที่เห็น
+- ยอดรวมสินค้า: ราคารวม (จำนวน × ราคาต่อหน่วย)
+- ข้ามบรรทัดที่เป็น: โปรโมชั่น, ส่วนลด, แต้ม, ยอดรวม, เงินสด, เงินทอน"""
+
+    try:
+        resp = _req.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={"Content-Type": "application/json"},
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 1000,
+                "messages": [{"role": "user", "content": prompt}],
+            },
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        text_out = "".join(
+            b["text"] for b in data.get("content", []) if b.get("type") == "text"
+        )
+        # ล้าง markdown code block ถ้ามี
+        text_out = re.sub(r"```(?:json)?|```", "", text_out).strip()
+        items = json.loads(text_out)
+        # normalize keys
+        result = []
+        for it in items:
+            result.append({
+                "ชื่อสินค้า":    str(it.get("ชื่อสินค้า", "")),
+                "จำนวน":        int(it.get("จำนวน", 1)),
+                "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
+            })
+        return result
+    except Exception as e:
+        return []  # fallback → ใช้ regex parser เดิม
 def _collapse(text: str) -> str:
     return re.sub(r'\s+', '', text)
 
@@ -1424,63 +1478,88 @@ def extract_items_cj(text: str) -> list:
     for idx, line in enumerate(lines):
         if _DATE_RE2.search(line) or _DATE_RE2.search(_collapse(line)):
             start_idx = idx + 1; break
-    stop_kw = ["ยอดรวม","รวมทั้งสิ้น","เงินสด","เงินทอน",
-               "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า"]
+
+    stop_kw = ["ยอดรวม","ยอดราเม","ยอดราม","บอดราม","รวมทั้งสิ้น",
+               "เงินสด","เงินเด","เงินทอน","เงินบน",
+               "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า",
+               "จํานวนสินค้ารวม","จำนวนสินค้ารวม"]
     skip_kw = ["BNO","8NO","POS","TAX","INCLUDED","ใบเสร็จ","โปรโม",
-               "ส่วนลด","แต้ม","ขอบคุณ","สาขา","RECEIPT","INVOICE",
-               "สมาชิก","ID:","QR","User"]
-    _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！]*'
+               "ส่วนลด","แต้ม","แต่ม","ขอบคุณ","สาขา","RECEIPT","INVOICE",
+               "สมาชิก","ID:","QR","User","หวานน้อย","ลดน้ำตาล",
+               "www.","FB:","ร้องเรียน","สมัคร"]
+
+    _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
+    # รูปแบบ: qty ชื่อสินค้า ราคาต่อหน่วย ราคารวม
     _full  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    # รูปแบบ: ชื่อสินค้า ราคาต่อหน่วย ราคารวม (ไม่มี qty)
     _fb_a  = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    # รูปแบบ: qty ชื่อสินค้า ราคาเดียว
     _fb_b  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
     _fb_c  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s*$')
+
     for line in lines[start_idx:]:
         line = line.strip()
         if not line: continue
         compact = _collapse(line)
+
+        # หยุดเมื่อเจอ keyword สรุปบิล
         if any(k in line or k in compact for k in stop_kw): break
         if re.search(r'จ.{0,3}นวนส', compact): break
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
-        if re.search(r'-\s*\d+[.,]\d{2}', line): continue
-        if len(line) < 5: continue
-        line_stripped = re.sub(r'^[.\[\]>"\'`*es]+\s*', '', line.strip())
-        if not line_stripped: line_stripped = line.strip()
-        lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$','',line_stripped).strip())
+        if re.search(r'-\s*\d+[.,]\d{2}', line): continue   # ส่วนลด (ติดลบ)
+        if len(line) < 4: continue
+
+        # ทำความสะอาดบรรทัด
+        line_clean = re.sub(r'^[.\[\]>"\'`*]+\s*', '', line.strip())
+        if not line_clean: line_clean = line.strip()
+        # ลบ V/v ท้ายบรรทัดที่อาจเหลืออยู่
+        line_clean = re.sub(r'\s+[Vv]\s*$', '', line_clean).strip()
+        lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$', '', line_clean).strip())
+
+        # ลอง match ทุก pattern
         m = _full.match(lf)
         if m:
             qty, nm, up, tp = m.groups()
             nm = _clean_item_name(nm)
-            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',nm)) >= 2:
-                u=parse_price(up); tt=parse_price(tp); q=int(qty)
-                if tt < u*0.5: tt = round(u*q,2)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":q,"ราคาต่อหน่วย":u,"ยอดรวมสินค้า":tt})
+            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
+                u = parse_price(up); tt = parse_price(tp); q = int(qty)
+                if tt < u * 0.5: tt = round(u * q, 2)
+                items.append({"ชื่อสินค้า": nm, "จำนวน": q,
+                              "ราคาต่อหน่วย": u, "ยอดรวมสินค้า": tt})
             continue
+
         m = _fb_a.match(lf)
         if m:
             nm, up, tp = m.groups()
             nm = _clean_item_name(nm)
-            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',nm)) >= 2:
-                items.append({"ชื่อสินค้า":nm,"จำนวน":1,
-                              "ราคาต่อหน่วย":parse_price(up),"ยอดรวมสินค้า":parse_price(tp)})
+            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
+                items.append({"ชื่อสินค้า": nm, "จำนวน": 1,
+                              "ราคาต่อหน่วย": parse_price(up),
+                              "ยอดรวมสินค้า": parse_price(tp)})
             continue
+
         m = _fb_b.match(lf)
         if m:
             qty, nm, price = m.groups()
             nm = _clean_item_name(nm)
-            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',nm)) >= 2:
+            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":int(qty),"ราคาต่อหน่วย":p,"ยอดรวมสินค้า":p})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": int(qty),
+                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": p})
             continue
+
         m = _fb_c.match(lf)
         if m:
             qty, nm, price = m.groups()
-            nm = re.sub(r'\s+[0-9]+[.,][0-9]{2}\s*',' ',nm)
+            nm = re.sub(r'\s+[0-9]+[.,][0-9]{2}\s*', ' ', nm)
             nm = _clean_item_name(nm)
-            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z]','',nm)) >= 3:
+            if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z]', '', nm)) >= 3:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":int(qty),"ราคาต่อหน่วย":p,"ยอดรวมสินค้า":p})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": int(qty),
+                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": p})
+
     return items
 
 
@@ -1798,8 +1877,11 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                 st.session_state["_gdrive_raw_texts"] = []
                 text  = run_ocr(sub_crops[0], engine=ocr_engine)
                 bill  = extract_receipt(text)
-                items = extract_items_cj(text)
                 gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                if ocr_engine == "gdrive" and gdrive_raw:
+                    items = extract_items_with_claude(gdrive_raw) or extract_items_cj(text)
+                else:
+                    items = extract_items_cj(text)
                 results.append({"filename": fname, "bill": bill, "items": items,
                                 "raw_text": text, "gdrive_raw": gdrive_raw,
                                 "image": img_to_bytes_png(sub_crops[0])})
@@ -1809,8 +1891,11 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     st.session_state["_gdrive_raw_texts"] = []
                     text  = run_ocr(crop, engine=ocr_engine)
                     bill  = extract_receipt(text)
-                    items = extract_items_cj(text)
                     gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                    if ocr_engine == "gdrive" and gdrive_raw:
+                        items = extract_items_with_claude(gdrive_raw) or extract_items_cj(text)
+                    else:
+                        items = extract_items_cj(text)
                     results.append({"filename": label, "bill": bill, "items": items,
                                     "raw_text": text, "gdrive_raw": gdrive_raw,
                                     "image": img_to_bytes_png(crop)})
@@ -2247,11 +2332,25 @@ def main():
                         )
                         # reset list ก่อนแต่ละบิล เพื่อให้จับ raw text ของบิลนี้
                         st.session_state["_gdrive_raw_texts"] = []
-                        text  = run_ocr(crop, engine=S.ocr_engine)
-                        bill  = extract_receipt(text)
-                        items = extract_items_cj(text)
-                        # ดึง raw text จาก Google Doc (ถ้า engine == gdrive)
+                        text      = run_ocr(crop, engine=S.ocr_engine)
+                        bill      = extract_receipt(text)
                         gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+
+                        # ── ดึงรายการสินค้า ──
+                        # ถ้าใช้ Google Drive OCR → ใช้ Claude API วิเคราะห์
+                        # (แม่นกว่า regex มาก เพราะ raw text สะอาดแล้ว)
+                        # ถ้า Claude ไม่ได้ผล → fallback regex เดิม
+                        raw_for_items = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+                        if S.ocr_engine == "gdrive" and gdrive_raw:
+                            progress.progress(
+                                (ci + 0.5) / len(crops),
+                                text=f"🤖 Claude วิเคราะห์รายการสินค้า บิล {ci+1}/{len(crops)}..."
+                            )
+                            items = extract_items_with_claude(gdrive_raw)
+                            if not items:  # Claude ไม่ได้ผล → regex fallback
+                                items = extract_items_cj(text)
+                        else:
+                            items = extract_items_cj(text)
                         all_bills.append({"filename":label,"bill":bill,"items":items,
                                           "raw_text":text,"gdrive_raw":gdrive_raw,
                                           "image":img_to_bytes_png(crop)})

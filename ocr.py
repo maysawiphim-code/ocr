@@ -1245,72 +1245,157 @@ def _clean_item_name(nm: str) -> str:
 
 def _merge_gdrive_lines(lines: list) -> list:
     """
-    Google Drive OCR มักแยกราคาออกเป็นบรรทัดใหม่ และมีบรรทัด V เดี่ยวๆ เช่น:
-        1 คาราบาวกรินแอปเปิ้ล18
+    Google Drive OCR มี 2 รูปแบบหลัก:
+
+    รูปแบบ A (สลับกัน — บิลส่วนใหญ่):
+        1 คาราบาว 18
         15.00
         15.00 V
-        V
-    → รวมเป็น: "1 คาราบาวกรินแอปเปิ้ล18 15.00 15.00"
+    → "1 คาราบาว 18 15.00 15.00"
 
-    นอกจากนี้ยังรวม keyword+ราคาที่แยกบรรทัด เช่น:
-        ยอดรวม
-        88.00 บาท
-    → "ยอดรวม 88.00 บาท"
+    รูปแบบ B (แยก block — บิลที่มีสินค้าหลายตัว):
+        ชื่อ1          ← ชื่อสินค้าทุกตัวมาก่อน
+        ชื่อ2
+        ...
+        10.00          ← ราคาทุกตัวตามมา
+        10.00 V
+        45.00
+        45.00 V
+        ...
+    → จับคู่ชื่อ+ราคาตามลำดับ
     """
-    # บรรทัดที่เป็นแค่ราคา/V/ช่องว่าง
-    _price_only = re.compile(r'^[\d.,\s]+[Vv]?\s*$')
-    _v_only     = re.compile(r'^[Vv]\s*$')           # บรรทัด V เดี่ยวๆ
+    _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
+    _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
-    _kw_amount  = re.compile(r'ยอดรวม|เงินสด|เงินทอน|รวมทั้งสิ้น', re.IGNORECASE)
+    _item_start = re.compile(r'^\d+\s+\S')       # บรรทัดขึ้นต้นด้วยเลข qty
+    _kw_amount  = re.compile(
+        r'ยอดรวม|ยอดราม|ยอดราเม|เงินสด|เงินเด|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
+        re.IGNORECASE)
 
-    # pass 1: กรองบรรทัด V เดี่ยวๆ ออก
+    # pass 1: กรอง V เดี่ยวๆ ออก
     lines = [l for l in lines if not _v_only.match(l.strip())]
 
-    merged = []
-    i = 0
-    while i < len(lines):
-        line = lines[i].strip()
-        if not line:
+    # ── ตรวจว่าเป็น block format ไหม ──
+    # หา index ที่เริ่ม block ราคา (ราคาล้วนต่อเนื่องกัน 3+ บรรทัด)
+    def _find_price_block(lines):
+        """
+        คืน (name_end_idx, price_start_idx) ถ้าเจอ block ราคา
+        หรือ None ถ้าไม่ใช่รูปแบบ block
+        """
+        consec = 0
+        for i, line in enumerate(lines):
+            if _price_only.match(line.strip()):
+                consec += 1
+                if consec >= 3:
+                    # หา block เริ่มต้น
+                    start = i - consec + 1
+                    return start
+            else:
+                consec = 0
+        return None
+
+    # ── รวม keyword กับราคาบรรทัดถัดไปเสมอ (ทำก่อนทุก pass) ──
+    def _merge_kw_price(lines):
+        out = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if _kw_amount.search(line) and not _RE_PRICE.search(line):
+                j = i + 1
+                if j < len(lines):
+                    nx = lines[j].strip()
+                    if _RE_PRICE.search(nx):
+                        out.append(line + " " + nx)
+                        i = j + 1
+                        continue
+            out.append(line)
+            i += 1
+        return out
+
+    lines = _merge_kw_price(lines)
+
+    price_block_start = _find_price_block(lines)
+
+    if price_block_start and price_block_start > 3:
+        # ── รูปแบบ B: แยก block ──
+        # แยก names และ prices
+        name_lines  = lines[:price_block_start]
+        price_lines = lines[price_block_start:]
+
+        # เก็บเฉพาะชื่อสินค้า (บรรทัดที่เริ่มด้วยเลข qty หรือมีข้อความไทย)
+        item_names = [l.strip() for l in name_lines
+                      if l.strip() and not _price_only.match(l.strip())
+                      and not _kw_amount.search(l.strip())
+                      and (_item_start.match(l.strip()) or _has_thai.search(l.strip()))
+                      and not re.search(r'BNO|TAX|VAT|POS|User|ID:', l, re.IGNORECASE)
+                      and not re.match(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}', l.strip())]
+
+        # เก็บเฉพาะราคาจริง (ไม่ใช่ V) และ deduplicate ราคาซ้ำ
+        raw_prices = []
+        for l in price_lines:
+            l = l.strip()
+            if not l: continue
+            if _kw_amount.search(l): break   # หยุดเมื่อเจอ keyword สรุป
+            clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
+            if _price_only.match(l) and clean:
+                # เก็บราคาแรกของแต่ละคู่ (ข้ามราคาซ้ำ)
+                if not raw_prices or raw_prices[-1] != clean:
+                    raw_prices.append(clean)
+
+        # จับคู่ชื่อ+ราคา
+        merged = []
+        for i, name in enumerate(item_names):
+            if i < len(raw_prices):
+                merged.append(f"{name} {raw_prices[i]}")
+            else:
+                merged.append(name)
+
+        # เพิ่มบรรทัดที่เหลือหลัง block ราคา (ยอดรวม เงินสด ฯลฯ)
+        after_block = []
+        found_kw = False
+        for l in price_lines:
+            if _kw_amount.search(l.strip()):
+                found_kw = True
+            if found_kw:
+                after_block.append(l)
+        merged += after_block
+
+        # เพิ่ม header lines (ก่อน item_names)
+        header = [l for l in name_lines
+                  if l.strip() and l.strip() not in [n for n in item_names]]
+        return header + merged
+
+    else:
+        # ── รูปแบบ A: สลับกัน (เดิม) ──
+        merged = []
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            if not line:
+                merged.append(line)
+                i += 1
+                continue
+            if _item_start.match(line) and _has_thai.search(line):
+                combined = line
+                j = i + 1
+                price_count = 0
+                while j < len(lines) and price_count < 2:
+                    nx = lines[j].strip()
+                    if not nx: break
+                    if _price_only.match(nx):
+                        part = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
+                        if part: combined += " " + part
+                        price_count += 1
+                        j += 1
+                    else:
+                        break
+                if price_count > 0:
+                    merged.append(combined)
+                    i = j
+                    continue
             merged.append(line)
             i += 1
-            continue
-
-        # ── รวม keyword ยอดรวม/เงินสด/เงินทอน กับราคาบรรทัดถัดไป ──
-        if _kw_amount.search(line) and not _RE_PRICE.search(line):
-            j = i + 1
-            if j < len(lines):
-                next_line = lines[j].strip()
-                price_m = _RE_PRICE.search(next_line)
-                if price_m:
-                    merged.append(line + " " + next_line)
-                    i = j + 1
-                    continue
-
-        # ── รวมชื่อสินค้า (ขึ้นต้นด้วยเลข) กับราคาบรรทัดถัดไป ──
-        if re.match(r'^\d+\s+\S', line) and _has_thai.search(line):
-            combined = line
-            j = i + 1
-            price_count = 0
-            while j < len(lines) and price_count < 2:
-                next_line = lines[j].strip()
-                if not next_line:
-                    break
-                if _price_only.match(next_line):
-                    price_part = re.sub(r'\s*[Vv]\s*$', '', next_line).strip()
-                    if price_part:
-                        combined += " " + price_part
-                    price_count += 1
-                    j += 1
-                else:
-                    break
-            if price_count > 0:
-                merged.append(combined)
-                i = j
-                continue
-
-        merged.append(line)
-        i += 1
-    return merged
+        return merged
 
 
 def extract_items_cj(text: str) -> list:

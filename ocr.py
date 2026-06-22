@@ -2222,8 +2222,15 @@ def main():
                     all_bills = []
                     fname = (S.gallery_files[S.selected_idx][0]
                              if 0 <= S.selected_idx < len(S.gallery_files) else "image")
+                    progress = st.progress(0, text="เริ่มต้น OCR...")
                     for ci, crop in enumerate(crops):
                         label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
+                        progress.progress(
+                            (ci) / len(crops),
+                            text=f"📤 กำลังส่ง Google Drive OCR: บิล {ci+1}/{len(crops)}..."
+                                 if S.ocr_engine == "gdrive"
+                                 else f"🔍 OCR บิล {ci+1}/{len(crops)}..."
+                        )
                         # reset list ก่อนแต่ละบิล เพื่อให้จับ raw text ของบิลนี้
                         st.session_state["_gdrive_raw_texts"] = []
                         text  = run_ocr(crop, engine=S.ocr_engine)
@@ -2234,6 +2241,7 @@ def main():
                         all_bills.append({"filename":label,"bill":bill,"items":items,
                                           "raw_text":text,"gdrive_raw":gdrive_raw,
                                           "image":img_to_bytes_png(crop)})
+                    progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
                     S.all_bills = all_bills; S.step=4; st.rerun()
 
     # ── RESULTS ──

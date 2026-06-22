@@ -845,63 +845,135 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
         return f"[OCR ERROR] {e}"
 
 
-def extract_items_with_claude(raw_text: str) -> list:
-    """
-    ใช้ Claude API วิเคราะห์ข้อความจากบิลแทน regex parser
-    แม่นกว่ามากเพราะ Claude เข้าใจบริบทและรูปแบบที่หลากหลาย
-    คืนค่า list ของ dict เหมือนกับ extract_items_cj
-    """
-    import requests as _req
+# ─────────────────────────────────────────────────────────────────────────────
+# ██  Gemini API — วิเคราะห์บิลจาก raw text  ██
+# ─────────────────────────────────────────────────────────────────────────────
+# วิธีตั้งค่า:
+# 1. ไปที่ https://aistudio.google.com/app/apikey
+# 2. กด "Create API key" → คัดลอก key
+# 3. ใส่ใน .streamlit/secrets.toml:
+#    GEMINI_API_KEY = "AIzaSy..."
+# ฟรี: 1,500 requests/วัน, 1M tokens/นาที (Gemini 2.0 Flash)
+# ─────────────────────────────────────────────────────────────────────────────
 
+_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+
+def _get_gemini_key() -> str:
+    """อ่าน Gemini API key จาก secrets หรือ env"""
+    try:
+        return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY", "")
+
+def is_gemini_configured() -> bool:
+    return bool(_get_gemini_key().strip())
+
+def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
+    """เรียก Gemini API และคืนค่า text response"""
+    import requests as _req
+    key = _get_gemini_key()
+    if not key:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    resp = _req.post(
+        f"{_GEMINI_API_URL}?key={key}",
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": 0.1,   # ต้องการความแม่นยำ ไม่ต้องการ creative
+            },
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
+
+
+def extract_with_gemini(raw_text: str) -> dict:
+    """
+    ใช้ Gemini วิเคราะห์ raw text จากบิล CJ Express ครบทั้งใบ:
+    - รายการสินค้าทุกรายการ
+    - ยอดรวม เงินสด เงินทอน
+    - วันที่ เวลา สาขา เลขที่ใบเสร็จ
+    คืนค่า dict ที่มี "bill" และ "items" (รูปแบบเดียวกับ extract_receipt + extract_items_cj)
+    """
     prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
 
 {raw_text}
 
-กรุณาดึงรายการสินค้าออกมาให้ครบทุกรายการ (ไม่รวมโปรโมชั่น/ส่วนลด)
-ตอบเป็น JSON array เท่านั้น ไม่ต้องมีข้อความอื่น รูปแบบ:
-[
-  {{"ชื่อสินค้า": "ชื่อ", "จำนวน": 1, "ราคาต่อหน่วย": 0.0, "ยอดรวมสินค้า": 0.0}},
-  ...
-]
+กรุณาวิเคราะห์และดึงข้อมูลทั้งหมดออกมาเป็น JSON ตามรูปแบบนี้เท่านั้น ไม่ต้องมีข้อความอื่น:
+{{
+  "date": "วัน/เดือน/ปี",
+  "time": "HH:MM",
+  "branch": "ชื่อสาขา",
+  "pos_id": "รหัสสาขา 5 หลัก",
+  "rcpt_no": "เลขที่ใบเสร็จ",
+  "total_amount": 0.0,
+  "cash": 0.0,
+  "change": 0.0,
+  "items": [
+    {{
+      "ชื่อสินค้า": "ชื่อสินค้า",
+      "จำนวน": 1,
+      "ราคาต่อหน่วย": 0.0,
+      "ยอดรวมสินค้า": 0.0
+    }}
+  ]
+}}
 
-กฎ:
-- ชื่อสินค้า: ใช้ชื่อที่อ่านได้จาก OCR (แม้จะสั้นหรือไม่สมบูรณ์)
-- จำนวน: ตัวเลขหน้าชื่อสินค้า (ถ้าไม่มีให้ใส่ 1)
-- ราคาต่อหน่วย: ราคาแรกที่เห็น
-- ยอดรวมสินค้า: ราคารวม (จำนวน × ราคาต่อหน่วย)
-- ข้ามบรรทัดที่เป็น: โปรโมชั่น, ส่วนลด, แต้ม, ยอดรวม, เงินสด, เงินทอน"""
+กฎสำคัญ:
+- items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม
+- แต่ละสินค้ามี 3 บรรทัด: ชื่อ → ราคาต่อหน่วย → ราคารวม V
+- จำนวน: ตัวเลขหรือ "-" หน้าชื่อสินค้า (ถ้าเป็น "-" ให้ใส่ 1)
+- total_amount: ยอดรวมหลังหักส่วนลด
+- cash: เงินที่จ่าย (เงินสด/QR)
+- change: เงินทอน
+- ถ้าหาข้อมูลไม่เจอให้ใส่ "" หรือ 0.0"""
 
     try:
-        resp = _req.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"Content-Type": "application/json"},
-            json={
-                "model": "claude-sonnet-4-6",
-                "max_tokens": 1000,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        text_out = "".join(
-            b["text"] for b in data.get("content", []) if b.get("type") == "text"
-        )
-        # ล้าง markdown code block ถ้ามี
-        text_out = re.sub(r"```(?:json)?|```", "", text_out).strip()
-        items = json.loads(text_out)
-        # normalize keys
-        result = []
-        for it in items:
-            result.append({
+        text_out = _call_gemini(prompt)
+        # ล้าง markdown code block
+        text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
+        data = json.loads(text_out)
+
+        # normalize bill fields
+        bill = {
+            "date":         str(data.get("date", "ไม่พบ")),
+            "time":         str(data.get("time", "ไม่พบ")),
+            "branch":       str(data.get("branch", "ไม่พบ")),
+            "pos_id":       str(data.get("pos_id", "ไม่พบ")),
+            "rcpt_no":      str(data.get("rcpt_no", "ไม่พบ")),
+            "total_amount": float(data.get("total_amount", 0)),
+            "cash":         float(data.get("cash", 0)),
+            "change":       float(data.get("change", 0)),
+            "tax_id":       "ไม่พบ",
+            "user":         "ไม่พบ",
+            "name":         "ไม่พบ",
+        }
+
+        # normalize items
+        items = []
+        for it in data.get("items", []):
+            items.append({
                 "ชื่อสินค้า":    str(it.get("ชื่อสินค้า", "")),
                 "จำนวน":        int(it.get("จำนวน", 1)),
                 "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
                 "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
             })
-        return result
+
+        return {"bill": bill, "items": items, "ok": True}
+
     except Exception as e:
-        return []  # fallback → ใช้ regex parser เดิม
+        return {"bill": None, "items": [], "ok": False, "error": str(e)}
+
+
+def extract_items_with_gemini(raw_text: str) -> list:
+    """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
+    result = extract_with_gemini(raw_text)
+    return result.get("items", [])
+
+
 def _collapse(text: str) -> str:
     return re.sub(r'\s+', '', text)
 
@@ -911,11 +983,12 @@ def _th_spaced(word: str) -> str:
 _KW_CANONICAL = {
     "ยอดรวม": ["ยอดรวม","ยอตรวม","ยอดราม","บอดรวม","มอดราม","นลดราม","นอดรวม",
                "นลดร5าม","นลดร6าม","นลดรSาม","ยถอดรวม","ยถอดราม","มบลดาม","บลดราม",
-               "รวมสุทธิ","รวมทั้งสิ้น","Total","NET TOTAL","net total"],
+               "รวมสุทธิ","รวมทั้งสิ้น","Total","NET TOTAL","net total",
+               "UORTIN","UORT"],
     "เงินสด": ["เงินสด","เง็นสด","เม็นสด","เแงินสด","CASH","QR","QR5","QRcode",
-               "ฝัน","เงินสะด","เฉินสด","ฝันเค"],
+               "ฝัน","เงินสะด","เฉินสด","ฝันเค","ในสต","เงินเด"],
     "เงินทอน": ["เงินทอน","เง็นทอน","เงินทอม","เงินหอน","เงินหอแ",
-                "Change","CHANGE","เงินทอร","เง็นทอร","เงน11าน"],
+                "Change","CHANGE","เงินทอร","เง็นทอร","เงน11าน","เงินบน"],
     "สาขา": ["มอร์สาขา","CJมอร์","CJมอร์สาขา","สาขา","สาขาที่","มอร์สาขาที่",
              "มอร์ลาขา","ซีเจมอร์"],
 }
@@ -1321,9 +1394,10 @@ def _merge_gdrive_lines(lines: list) -> list:
     _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
-    _item_start = re.compile(r'^\d+\s+\S')       # บรรทัดขึ้นต้นด้วยเลข qty
+    # รองรับทั้ง "1 ชื่อ" และ "- ชื่อ" (dash แทน qty)
+    _item_start = re.compile(r'^(?:\d+|-)\s+\S')
     _kw_amount  = re.compile(
-        r'ยอดรวม|ยอดราม|ยอดราเม|เงินสด|เงินเด|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
+        r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
 
     # pass 1: กรอง V เดี่ยวๆ ออก
@@ -1479,8 +1553,10 @@ def extract_items_cj(text: str) -> list:
         if _DATE_RE2.search(line) or _DATE_RE2.search(_collapse(line)):
             start_idx = idx + 1; break
 
-    stop_kw = ["ยอดรวม","ยอดราเม","ยอดราม","บอดราม","รวมทั้งสิ้น",
-               "เงินสด","เงินเด","เงินทอน","เงินบน",
+    stop_kw = ["ยอดรวม","ยอดราเม","ยอดราม","บอดราม","UORTIN","UORT",
+               "รวมทั้งสิ้น",
+               "เงินสด","เงินเด","ในสต",
+               "เงินทอน","เงินบน",
                "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า",
                "จํานวนสินค้ารวม","จำนวนสินค้ารวม"]
     skip_kw = ["BNO","8NO","POS","TAX","INCLUDED","ใบเสร็จ","โปรโม",
@@ -1489,13 +1565,12 @@ def extract_items_cj(text: str) -> list:
                "www.","FB:","ร้องเรียน","สมัคร"]
 
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
-    # รูปแบบ: qty ชื่อสินค้า ราคาต่อหน่วย ราคารวม
-    _full  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    # รูปแบบ: ชื่อสินค้า ราคาต่อหน่วย ราคารวม (ไม่มี qty)
+    # รองรับ qty เป็นตัวเลขหรือ "-"
+    _QTY    = r'(?:\d+|-)'
+    _full  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
     _fb_a  = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    # รูปแบบ: qty ชื่อสินค้า ราคาเดียว
-    _fb_b  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    _fb_c  = re.compile(r'^[\.]?\s*(\d+)\s+(.+?)\s+(\d+[.,]\d{2})\s*$')
+    _fb_b  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_c  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})\s*$')
 
     for line in lines[start_idx:]:
         line = line.strip()
@@ -1518,15 +1593,15 @@ def extract_items_cj(text: str) -> list:
         line_clean = re.sub(r'\s+[Vv]\s*$', '', line_clean).strip()
         lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$', '', line_clean).strip())
 
-        # ลอง match ทุก pattern
         m = _full.match(lf)
         if m:
-            qty, nm, up, tp = m.groups()
+            qty_raw, nm, up, tp = m.groups()
+            qty = 1 if qty_raw == '-' else int(qty_raw)
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
-                u = parse_price(up); tt = parse_price(tp); q = int(qty)
-                if tt < u * 0.5: tt = round(u * q, 2)
-                items.append({"ชื่อสินค้า": nm, "จำนวน": q,
+                u = parse_price(up); tt = parse_price(tp)
+                if tt < u * 0.5: tt = round(u * qty, 2)
+                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
                               "ราคาต่อหน่วย": u, "ยอดรวมสินค้า": tt})
             continue
 
@@ -1542,23 +1617,25 @@ def extract_items_cj(text: str) -> list:
 
         m = _fb_b.match(lf)
         if m:
-            qty, nm, price = m.groups()
+            qty_raw, nm, price = m.groups()
+            qty = 1 if qty_raw == '-' else int(qty_raw)
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า": nm, "จำนวน": int(qty),
-                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": p})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
+                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": round(p * qty, 2)})
             continue
 
         m = _fb_c.match(lf)
         if m:
-            qty, nm, price = m.groups()
+            qty_raw, nm, price = m.groups()
+            qty = 1 if qty_raw == '-' else int(qty_raw)
             nm = re.sub(r'\s+[0-9]+[.,][0-9]{2}\s*', ' ', nm)
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z]', '', nm)) >= 3:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า": nm, "จำนวน": int(qty),
-                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": p})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
+                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": round(p * qty, 2)})
 
     return items
 
@@ -1875,12 +1952,15 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                 sub_crops = [img_cv]
             if len(sub_crops) == 1:
                 st.session_state["_gdrive_raw_texts"] = []
-                text  = run_ocr(sub_crops[0], engine=ocr_engine)
-                bill  = extract_receipt(text)
+                text      = run_ocr(sub_crops[0], engine=ocr_engine)
                 gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                if ocr_engine == "gdrive" and gdrive_raw:
-                    items = extract_items_with_claude(gdrive_raw) or extract_items_cj(text)
+                raw_for_ai = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else ""
+                if raw_for_ai and is_gemini_configured():
+                    gr = extract_with_gemini(raw_for_ai)
+                    bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
+                    items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                 else:
+                    bill  = extract_receipt(text)
                     items = extract_items_cj(text)
                 results.append({"filename": fname, "bill": bill, "items": items,
                                 "raw_text": text, "gdrive_raw": gdrive_raw,
@@ -1889,12 +1969,15 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                 for ci, crop in enumerate(sub_crops, 1):
                     label = f"{fname} — บิล {ci}"
                     st.session_state["_gdrive_raw_texts"] = []
-                    text  = run_ocr(crop, engine=ocr_engine)
-                    bill  = extract_receipt(text)
+                    text      = run_ocr(crop, engine=ocr_engine)
                     gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                    if ocr_engine == "gdrive" and gdrive_raw:
-                        items = extract_items_with_claude(gdrive_raw) or extract_items_cj(text)
+                    raw_for_ai = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else ""
+                    if raw_for_ai and is_gemini_configured():
+                        gr = extract_with_gemini(raw_for_ai)
+                        bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
+                        items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                     else:
+                        bill  = extract_receipt(text)
                         items = extract_items_cj(text)
                     results.append({"filename": label, "bill": bill, "items": items,
                                     "raw_text": text, "gdrive_raw": gdrive_raw,
@@ -2103,13 +2186,35 @@ def main():
                 "**Google Vision API** ถ้าผลยังไม่แม่นพอ"
             )
 
+        # ── Gemini API status ──
+        gemini_ready = is_gemini_configured()
+        if S.ocr_engine == "gdrive":
+            st.divider()
+            st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text**")
+            if gemini_ready:
+                st.success(
+                    "✅ ตั้งค่า Gemini API key แล้ว\n\n"
+                    "Google Drive OCR อ่านข้อความ → Gemini วิเคราะห์รายการสินค้า+ยอดเงิน\n"
+                    "ฟรี 1,500 requests/วัน (Gemini 2.0 Flash)"
+                )
+            else:
+                st.info(
+                    "💡 เพิ่ม Gemini API เพื่อวิเคราะห์บิลแม่นขึ้น (ฟรี 1,500 requests/วัน)\n\n"
+                    "1. ไปที่ https://aistudio.google.com/app/apikey → **Create API key**\n"
+                    "2. ใส่ใน `.streamlit/secrets.toml`:\n"
+                    "```toml\n"
+                    'GEMINI_API_KEY = "AIzaSy..."\n'
+                    "```\n"
+                    "ถ้าไม่ตั้งค่า แอปจะใช้ regex parser แทน (แม่นน้อยกว่า)"
+                )
+
         # ── ตาราง comparison ──
         with st.expander("📊 เปรียบเทียบ OCR Engine ทั้ง 3 แบบ"):
             st.markdown("""
 | Engine | ค่าใช้จ่าย | ความแม่น | ภาษาไทย | Login | Speed |
 |--------|-----------|---------|---------|-------|-------|
 | 🆓 Tesseract | ฟรี | ⭐⭐ | พอใช้ | ❌ ไม่ต้อง | ⚡⚡⚡ |
-| 📄 **Google Drive OCR** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐** | **ดี** | ✅ Login Google | ⚡⚡ |
+| 📄 **Drive OCR + Gemini** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | **ดีมาก** | ✅ Login + API Key | ⚡⚡ |
 | 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ดีมาก | ✅ API Key | ⚡⚡ |
 """)
 
@@ -2333,23 +2438,27 @@ def main():
                         # reset list ก่อนแต่ละบิล เพื่อให้จับ raw text ของบิลนี้
                         st.session_state["_gdrive_raw_texts"] = []
                         text      = run_ocr(crop, engine=S.ocr_engine)
-                        bill      = extract_receipt(text)
                         gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
 
-                        # ── ดึงรายการสินค้า ──
-                        # ถ้าใช้ Google Drive OCR → ใช้ Claude API วิเคราะห์
-                        # (แม่นกว่า regex มาก เพราะ raw text สะอาดแล้ว)
-                        # ถ้า Claude ไม่ได้ผล → fallback regex เดิม
-                        raw_for_items = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
-                        if S.ocr_engine == "gdrive" and gdrive_raw:
+                        # ── ดึงข้อมูลบิล ──
+                        # ถ้าใช้ Google Drive OCR + Gemini → วิเคราะห์ครบทั้งใบในครั้งเดียว
+                        # (ทั้ง items และ bill fields: วันที่ ยอดรวม เงินสด เงินทอน)
+                        raw_for_ai = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else ""
+                        if raw_for_ai and is_gemini_configured():
                             progress.progress(
                                 (ci + 0.5) / len(crops),
-                                text=f"🤖 Claude วิเคราะห์รายการสินค้า บิล {ci+1}/{len(crops)}..."
+                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}..."
                             )
-                            items = extract_items_with_claude(gdrive_raw)
-                            if not items:  # Claude ไม่ได้ผล → regex fallback
+                            gemini_result = extract_with_gemini(raw_for_ai)
+                            if gemini_result["ok"] and gemini_result["items"]:
+                                bill  = gemini_result["bill"]
+                                items = gemini_result["items"]
+                            else:
+                                # Gemini ไม่ได้ผล → fallback regex
+                                bill  = extract_receipt(text)
                                 items = extract_items_cj(text)
                         else:
+                            bill  = extract_receipt(text)
                             items = extract_items_cj(text)
                         all_bills.append({"filename":label,"bill":bill,"items":items,
                                           "raw_text":text,"gdrive_raw":gdrive_raw,

@@ -433,7 +433,7 @@ def split_by_positions(img_cv, split_px_list):
 #        GDRIVE_CLIENT_ID / GDRIVE_CLIENT_SECRET / GDRIVE_REDIRECT_URI
 # ─────────────────────────────────────────────────────────────────────────────
 
-_GDRIVE_SCOPES    = "https://www.googleapis.com/auth/drive"
+_GDRIVE_SCOPES    = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
 _GDRIVE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 _GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
@@ -734,13 +734,9 @@ has newline in client_id = {chr(10) in cfg['client_id']}""")
                 st.session_state.pop(k, None)
             st.rerun()
     else:
-        st.info(
-            "🔑 กดปุ่มด้านล่างเพื่อ Login Google Drive\n\n"
-            "แอปจะ redirect ไปหน้า Google → เลือก account → กด Allow\n"
-            "แล้ว redirect กลับมาที่แอปอัตโนมัติ"
-        )
         auth_url = gdrive_get_auth_url()
-        # ใช้ link แทนปุ่ม redirect เพราะ st.button ไม่สามารถ redirect ได้
+        st.info("🔑 กดปุ่มด้านล่างเพื่อ Login Google Drive")
+        # ปุ่ม Login
         st.markdown(
             f"""<a href="{auth_url}" target="_self"
                style="display:inline-block;padding:10px 24px;background:#4285F4;
@@ -750,6 +746,31 @@ has newline in client_id = {chr(10) in cfg['client_id']}""")
             </a>""",
             unsafe_allow_html=True,
         )
+
+        # ── fallback: วาง code เองกรณี redirect มีปัญหา ──
+        with st.expander("⚙️ Login ด้วยตัวเอง (ถ้าปุ่มด้านบนไม่ทำงาน)"):
+            st.markdown(
+                "1. กดลิงก์นี้เพื่อเปิดหน้า Google Login:\n\n"
+                f"**[คลิกที่นี่เพื่อ Login]({auth_url})**\n\n"
+                "2. Login และกด Allow\n\n"
+                "3. Browser จะ redirect ไปหน้าว่างหรือ error — **ดู URL ใน address bar**\n\n"
+                "4. Copy เฉพาะค่าหลัง `?code=` จนถึง `&` แรก มาวางด้านล่างนี้:"
+            )
+            manual_code = st.text_input(
+                "วาง Authorization Code ที่ได้จาก URL ที่นี่:",
+                key="gdrive_manual_code",
+                placeholder="4/0AX4XfWh...",
+            )
+            if st.button("✅ ยืนยัน Code", key="gdrive_manual_submit", type="primary"):
+                if manual_code.strip():
+                    with st.spinner("กำลัง Login..."):
+                        ok = gdrive_exchange_code(manual_code.strip())
+                    if ok:
+                        st.success("✅ Login สำเร็จ!")
+                        st.rerun()
+                    else:
+                        err = st.session_state.pop("gdrive_auth_error", "unknown")
+                        st.error(f"Login ไม่สำเร็จ: {err}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

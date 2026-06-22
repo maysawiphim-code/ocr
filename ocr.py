@@ -511,7 +511,7 @@ def split_by_positions(img_cv, split_px_list):
 # เป็น 1 หน่วยต่อภาพ) เกินจากนั้นคิดราคาถูกมาก ดูราคาล่าสุดที่
 # https://cloud.google.com/vision/pricing
 # ─────────────────────────────────────────────────────────────────────────────
-_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "AQ.Ab8RN6KC7OU7lHDWroaQBmBmDk0LWFYahDkWvWxTHL5eUE0igA")  # หรือใส่คีย์ตรงๆ ในเครื่องหมาย "" นี้
+_VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "")  # หรือใส่คีย์ตรงๆ ในเครื่องหมาย "" นี้
 
 def is_vision_api_configured() -> bool:
     """เช็คว่าตั้งค่า Google Vision API key ไว้แล้วหรือยัง"""
@@ -688,13 +688,25 @@ def _find_prices_in_line(line: str) -> list:
     for m in re.finditer(r'\b(\d{1,5})\s+(\d{2})\b', line):
         prices.append(parse_price(f"{m.group(1)}.{m.group(2)}"))
     if prices: return prices
-    # 3. ไม่มีจุด ลงท้าย 00: "3900", "11000"
+    # 3. ตัวอักษรไทย/อังกฤษเดี่ยว 1 ตัว แทรกกลางกลุ่มตัวเลข — เป็นเลข "0"
+    #    ที่ OCR อ่านผิดเป็นตัวอักษร (ไม่ใช่ตัวคั่นทศนิยม) เช่น
+    #    "10 ว 00" จริงๆ คือ "100.00" (เลข 0 ตัวที่ 3 ถูกอ่านเป็น ว แทรกกลาง
+    #    ระหว่าง "10" กับ "00") แทนตัวอักษรด้วย "0" แล้วรวมกลุ่มตัวเลข
+    #    เข้าด้วยกันก่อนตัดสินใจตำแหน่งทศนิยมแบบเดียวกับ fallback ถัดไป
+    _merged_zero = re.sub(r'(\d)\s*[ก-๙a-zA-Z]\s*(\d)', r'\g<1>0\g<2>', line)
+    if _merged_zero != line:
+        _mc = _collapse(_merged_zero)
+        for m in re.finditer(r'(?<!\d)(\d{3,6})(?!\d)', _mc):
+            n = m.group(1)
+            if n.endswith('00'): prices.append(parse_price(n))
+        if prices: return prices
+    # 4. ไม่มีจุด ลงท้าย 00: "3900", "11000"
     c = _collapse(line)
     for m in re.finditer(r'\b(\d{3,6})\b', c):
         n = m.group(1)
         if n.endswith('00'): prices.append(parse_price(n))
     if prices: return prices
-    # 4. เลขติดกับตัวอักษรไทย/อังกฤษโดยไม่มีช่องว่างคั่น (\b ใช้ไม่ได้ในกรณีนี้
+    # 5. เลขติดกับตัวอักษรไทย/อังกฤษโดยไม่มีช่องว่างคั่น (\b ใช้ไม่ได้ในกรณีนี้
     #    เพราะตัวอักษรไทยไม่ใช่ word character ของ \b) เช่น "ส70000wiv"
     for m in re.finditer(r'(?<!\d)(\d{3,6})(?!\d)', c):
         n = m.group(1)
@@ -847,7 +859,12 @@ def _find_pos_id(text: str, compact: str, lines: list) -> str:
     # 3. fallback: เลข 5 หลักตัวแรกที่เจอใน compact ทั้งก้อน (ก่อนถึง TAX ID ซึ่งยาว 13 หลัก)
     m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{5})', compact, re.IGNORECASE)
     if m: return m.group(1)
-    nums_all = re.findall(r'\b\d{5}\b', compact)
+    # หมายเหตุ: ใช้ (?<!\d)...(?!\d) แทน \b เพราะ \b ใช้ไม่ได้ระหว่างตัวอักษร
+    # ไทยกับตัวเลข (ตัวอักษรไทยไม่ถูกนับเป็น \w ในมาตรฐาน regex ของ Python)
+    # ทำให้ \b\d{5}\b ไม่ match เลข 5 หลักที่อยู่ติดกับข้อความไทยโดยไม่มี
+    # ช่องว่างคั่นเลย เช่น "...สาวาถี01745หนองแสนะ" ซึ่งเป็นรูปแบบที่ OCR
+    # มักให้ผลออกมาบ่อยเมื่อความคมชัดของภาพต่ำ
+    nums_all = re.findall(r'(?<!\d)\d{5}(?!\d)', compact)
     if nums_all: return nums_all[0]
 
     # 4. fallback สุดท้าย: POS terminal number (NO1/NO2/...) ถ้าไม่มีเลขสาขาเลย
@@ -882,14 +899,21 @@ def _find_branch(text: str, compact: str, lines: list) -> str:
         return f"สาขา {m_compact.group(1).replace(' ', '')}"
     return "ไม่พบ"
 
+_RE_POINTS_LINE = re.compile(r'แต\s*้?\s*ม', re.IGNORECASE)  # บรรทัดเกี่ยวกับแต้มสะสม
+
 def _find_amount(text_lines: list, kw_re: re.Pattern, allow_zero: bool = True) -> float:
     """
     หาจำนวนเงินจาก keyword line — spaced-aware
     ค้นหาราคาในบรรทัดทั้งรูปแบบปกติและ compact
     allow_zero=True: คืน 0.0 ถ้า OCR เจอ "0.00" จริง
+
+    ข้ามบรรทัดที่เกี่ยวกับ "แต้ม" สะสม (เช่น "5.00 แต้มแลกแทนเงินสด 50 บาท")
+    เพราะบรรทัดพวกนี้มักมีคำว่า "เงินสด"/"บาท" ปนอยู่ด้วยทั้งที่ไม่ใช่ยอดเงิน
+    จริงของบิล ทำให้จับผิดบรรทัดได้ถ้าไม่กรองออกก่อน
     """
     for line in text_lines:
         c = _collapse(line)
+        if _RE_POINTS_LINE.search(c): continue
         if not (kw_re.search(c) or kw_re.search(line)): continue
         prices = _find_prices_in_line(line)
         if not prices: prices = _find_prices_in_line(c)
@@ -913,8 +937,11 @@ def _find_amounts_positional(lines: list) -> list:
     """
     end_idx = 0
     for idx, line in enumerate(lines):
-        # รองรับ OCR สับสน ร↔ง (เช่น "รายการ" อ่านเป็น "งายการ")
-        if re.search(r'\d\s*[รง]\s*า\s*ย\s*ก\s*า\s*ร', line):
+        # รองรับ OCR สับสน ร↔ง (เช่น "รายการ" อ่านเป็น "งายการ") และไม่บังคับ
+        # ต้องมีตัวเลขนำหน้าติดกันเป๊ะอีกต่อไป (เดิม \d\s*[รง]... พลาดเคสที่
+        # ตัวเลขกับคำว่า "รายการ" ถูก OCR แยกออกจากกันไกล หรือมีตัวอักษรแทรก
+        # ระหว่าง ร/ง กับ ย เช่น "ใ ร จ ย ก า ร" ที่จริงคือ "รายการ")
+        if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line):
             end_idx = idx + 1
             break
 
@@ -1088,6 +1115,13 @@ def extract_receipt(text: str) -> dict:
             if re.search(r'เง\s*ิ\s*น\s*[1ไ7]\s*[าท]', line, re.IGNORECASE):
                 prices = _find_prices_in_line(line)
                 if prices and prices[-1] > 0: change = prices[-1]; break
+            # เคสเพี้ยนหนัก: "เงินทอน" เหลือแค่ "เง น 11 า น" (ิ หาย, ท→1,
+            # อ→า) — ไม่มี "ท" เหลือให้ pattern ข้างบนจับได้เลย ต้องเทียบ
+            # จาก compact string โดยตรงว่าขึ้นต้นด้วย "เงน" ตามด้วยเลข 1-2
+            # ตัวซ้ำกัน (1 หรือ l ที่ OCR สับสนกับ 1) แล้วตามด้วย "าน/านม"
+            if re.match(r'เง[นม]\s*[1lI]{1,2}\s*[าห][นม]', c, re.IGNORECASE):
+                prices = _find_prices_in_line(line) or _find_prices_in_line(c)
+                if prices and prices[-1] > 0: change = prices[-1]; break
 
     # fallback สุดท้าย: ถ้าหา "ยอดรวม" ด้วย keyword ทุกแบบไม่เจอเลย
     # (total ยังเป็น 0 อยู่ทั้งที่ผ่าน 2 รอบ keyword-based ด้านบนแล้ว)
@@ -1095,6 +1129,13 @@ def extract_receipt(text: str) -> dict:
     # ในกรณีนี้ค่า cash/change ที่ "เจอ" จาก keyword อื่นก็อาจสุ่มมั่วได้เช่นกัน
     # (เช่น keyword ของเงินสดบังเอิญไปจับบรรทัดอื่นที่ไม่ใช่เงินสดจริง)
     # จึงใช้ตำแหน่งสัมพัทธ์แทนทั้งชุด — ดูคำอธิบายใน _find_amounts_positional()
+    #
+    # หมายเหตุ: เงื่อนไขนี้ตั้งใจให้ผูกกับ total==0.0 เท่านั้น (ไม่ใช่ cash/change
+    # แยกอิสระ) เพราะตำแหน่งสัมพัทธ์ (positional) คำนวณจาก "ลำดับบรรทัดที่มี
+    # ราคา" นับจากจุดจบรายการสินค้า ถ้า total ถูกเจอแล้วจาก keyword ที่แม่นยำ
+    # (อยู่คนละตำแหน่งกับลำดับที่ positional namedคาดไว้ เช่น มีบรรทัดส่วนลด
+    # แทรกอยู่ก่อนยอดรวมจริง) การเอา positional[1]/[2] มาเขียนทับ cash/change
+    # จะยิ่งทำให้ผิดมากขึ้น เพราะตำแหน่งเลื่อนไม่ตรงกับที่ keyword เจอจริงแล้ว
     if total == 0.0:
         positional = _find_amounts_positional(lines)
         if len(positional) >= 1: total  = positional[0]
@@ -1130,15 +1171,35 @@ def extract_receipt(text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Item extractor (CJ) — engine v2 with spaced-line support
 # ─────────────────────────────────────────────────────────────────────────────
-def _fix_spaced_price(s: str) -> str:
-    # "25 00" → "25.00" (ช่องว่างแทนจุดทศนิยม 2 หลัก)
-    s = re.sub(r'(?<!\S)(\d+)\s+(\d{2})(?=\s|$)', r'\1.\2', s)
-    # "50 0" → "50.00" (OCR อ่านเลขท้ายตกหายไป 1 หลัก จาก "50.00" เดิม)
-    s = re.sub(r'(?<!\S)(\d+)\s+(\d)(?=\s|$)', r'\1.\g<2>0', s)
-    def _dot(m):
+def _fix_spaced_price_core(s: str) -> str:
+    # ทำ "เลข 3-4 หลักลงท้าย 00" ให้เป็นทศนิยมก่อนเสมอ (เช่น "1000" -> "10.00")
+    # ต้องทำขั้นนี้ก่อน "25 00" -> "25.00" เสมอ ไม่งั้นถ้าบรรทัดมีทั้งสองรูปแบบ
+    # ติดกัน (เช่น "1000 10 00") การรันสลับลำดับจะทำให้ได้จุดทศนิยมซ้อนกัน
+    # ผิดรูปแบบ (เช่น "10.00.10 00") เพราะ "1000" ถูกแปลงเป็น "10.00" ไปแล้ว
+    # แล้ว regex "(\d+)\s+(\d{2})" ตัวถัดมาดันไปจับ "00" ที่เหลือจาก "10" ก่อนหน้าซ้ำ
+    def _dot4(m):
         n = m.group(0)
-        return (n[:-2]+'.'+n[-2:]) if re.match(r'^\d{3,4}$', n) and n.endswith('00') else n
-    return re.sub(r'\b\d{3,4}\b', _dot, s)
+        return (n[:-2]+'.'+n[-2:]) if n.endswith('00') else n
+    s = re.sub(r'(?<!\d)\d{3,4}(?!\d)', _dot4, s)
+    # "25 00" → "25.00" (ช่องว่างแทนจุดทศนิยม 2 หลัก) — เฉพาะที่ยังไม่มีจุด
+    # นำหน้าอยู่แล้ว (กัน double-dot ซ้ำกับขั้นตอนด้านบน)
+    s = re.sub(r'(?<![.\d])(\d+)\s+(\d{2})(?=\s|$)', r'\1.\2', s)
+    # "50 0" → "50.00" (OCR อ่านเลขท้ายตกหายไป 1 หลัก จาก "50.00" เดิม)
+    s = re.sub(r'(?<![.\d])(\d+)\s+(\d)(?=\s|$)', r'\1.\g<2>0', s)
+    return s
+
+def _fix_spaced_price(s: str) -> str:
+    # ตัดเลขจำนวน (qty) นำหน้าออกก่อนเสมอ ไม่ให้ logic แก้ราคาด้านบนไปจับ
+    # ผิด เช่น "0 1 ชื่อสินค้า..." (เลข item index 2 ตัวติดกันต้นบรรทัด
+    # ที่ OCR เผลอใส่ "0" นำหน้า "1") จะถูกตีความผิดเป็นรูปแบบราคา
+    # "ช่องว่างแทนจุดทศนิยม" กลายเป็น "0.10" ทั้งที่ไม่ใช่ราคาเลย
+    # รองรับ qty นำหน้าได้สูงสุด 2 ตัวเลขติดกัน ตามด้วยอักขระที่ไม่ใช่ตัวเลข
+    # (จุดเริ่มต้นของชื่อสินค้า) จึงจะถือว่าเป็นส่วน qty ที่ต้องเว้นไว้
+    m = re.match(r'^((?:\d+\s+){1,2})(?=\D)(.*)$', s)
+    if m:
+        qty_prefix, rest = m.groups()
+        return qty_prefix + _fix_spaced_price_core(rest)
+    return _fix_spaced_price_core(s)
 
 def _clean_item_name(nm: str) -> str:
     """ยุบช่องว่างซ้ำ + ตัดสัญลักษณ์ขยะที่ติดหัว/ท้ายชื่อสินค้า (เช่น !, ", ', |)"""
@@ -1182,8 +1243,9 @@ def extract_items_cj(text: str) -> list:
         # หยุดเมื่อเจอ "เลข+รายการ" (สรุปจำนวนรายการ) แม้คำว่า "จำนวนสินค้า"
         # ข้างหน้าจะเพี้ยนจน regex ข้างบนจับไม่ได้ก็ตาม — "รายการ" เป็นคำที่ OCR
         # มักอ่านถูกอยู่เสมอเพราะไม่มีสระ/วรรณยุกต์ซับซ้อนเท่าคำอื่น
-        # รองรับ OCR สับสน ร↔ง ด้วย (เช่น "รายการ" อ่านเป็น "งายการ")
-        if re.search(r'\d\s*[รง]\s*า\s*ย\s*ก\s*า\s*ร', line): break
+        # รองรับ OCR สับสน ร↔ง ด้วย (เช่น "รายการ" อ่านเป็น "งายการ") และไม่
+        # บังคับตัวเลขนำหน้าติดกันเป๊ะ (รองรับตัวอักษรแทรกระหว่าง ร/ง กับ ย)
+        if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
         if re.search(r'-\s*\d+[.,]\d{2}', line): continue   # ส่วนลด (ติดลบ)

@@ -1276,22 +1276,36 @@ def _merge_gdrive_lines(lines: list) -> list:
     lines = [l for l in lines if not _v_only.match(l.strip())]
 
     # ── ตรวจว่าเป็น block format ไหม ──
-    # หา index ที่เริ่ม block ราคา (ราคาล้วนต่อเนื่องกัน 3+ บรรทัด)
     def _find_price_block(lines):
         """
-        คืน (name_end_idx, price_start_idx) ถ้าเจอ block ราคา
-        หรือ None ถ้าไม่ใช่รูปแบบ block
+        คืน price_start_idx ถ้าพบ block ราคาต่อเนื่อง >= 6 บรรทัด
+        และก่อนหน้านั้นมีชื่อสินค้า >= 3 ตัวที่ไม่มีราคาตามหลัง
+        (format B คือชื่อทุกตัวมาก่อน แล้วราคาทุกตัวตามหลัง)
+        format A จะมีราคาสลับกับชื่อ ไม่ใช่ block ยาว
         """
         consec = 0
+        block_start = None
         for i, line in enumerate(lines):
-            if _price_only.match(line.strip()):
+            s = line.strip()
+            if _price_only.match(s) and s:
+                if consec == 0:
+                    block_start = i
                 consec += 1
-                if consec >= 3:
-                    # หา block เริ่มต้น
-                    start = i - consec + 1
-                    return start
+                # ต้องมีราคาต่อเนื่อง >= 6 บรรทัด (3 สินค้า × 2 บรรทัด/สินค้า)
+                if consec >= 6:
+                    # ตรวจว่าก่อน block มีชื่อสินค้า (item_start) >= 3 ตัว
+                    # ที่ไม่มีราคาในบรรทัดเดียวกัน
+                    name_only_count = sum(
+                        1 for l in lines[:block_start]
+                        if _item_start.match(l.strip())
+                        and _has_thai.search(l)
+                        and not _RE_PRICE.search(l)
+                    )
+                    if name_only_count >= 3:
+                        return block_start
             else:
                 consec = 0
+                block_start = None
         return None
 
     # ── รวม keyword กับราคาบรรทัดถัดไปเสมอ (ทำก่อนทุก pass) ──

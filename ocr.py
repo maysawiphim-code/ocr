@@ -441,21 +441,21 @@ _GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 def _gdrive_client_config() -> dict:
     """
     อ่าน OAuth client config จาก st.secrets หรือ environment variables
-    คืนค่า dict ที่มี client_id, client_secret, redirect_uri
+    strip() ทุกค่าเพื่อกัน newline/whitespace ที่แอบซ่อนอยู่
     """
     try:
         cfg = st.secrets.get("gdrive", {})
         return {
-            "client_id":     cfg.get("client_id",     os.environ.get("GDRIVE_CLIENT_ID", "")),
-            "client_secret": cfg.get("client_secret", os.environ.get("GDRIVE_CLIENT_SECRET", "")),
+            "client_id":     cfg.get("client_id",     os.environ.get("GDRIVE_CLIENT_ID", "")).strip(),
+            "client_secret": cfg.get("client_secret", os.environ.get("GDRIVE_CLIENT_SECRET", "")).strip(),
             "redirect_uri":  cfg.get("redirect_uri",  os.environ.get("GDRIVE_REDIRECT_URI",
-                                                                       "http://localhost:8501/")),
+                                                                       "http://localhost:8501/")).strip(),
         }
     except Exception:
         return {
-            "client_id":     os.environ.get("GDRIVE_CLIENT_ID", ""),
-            "client_secret": os.environ.get("GDRIVE_CLIENT_SECRET", ""),
-            "redirect_uri":  os.environ.get("GDRIVE_REDIRECT_URI", "http://localhost:8501/"),
+            "client_id":     os.environ.get("GDRIVE_CLIENT_ID", "").strip(),
+            "client_secret": os.environ.get("GDRIVE_CLIENT_SECRET", "").strip(),
+            "redirect_uri":  os.environ.get("GDRIVE_REDIRECT_URI", "http://localhost:8501/").strip(),
         }
 
 
@@ -703,6 +703,19 @@ def render_gdrive_login_ui():
             "```"
         )
         return
+
+    # ── debug: แสดงค่าที่อ่านได้จริง ──
+    cfg = _gdrive_client_config()
+    with st.expander("🔍 Debug — ค่าที่อ่านได้จาก secrets", expanded=False):
+        st.code(f"""client_id     = "{cfg['client_id']}"
+client_secret = "{cfg['client_secret'][:8]}..."
+redirect_uri  = "{cfg['redirect_uri']}"
+client_id length = {len(cfg['client_id'])}
+has newline in client_id = {chr(10) in cfg['client_id']}""")
+        auth_url = gdrive_get_auth_url()
+        st.markdown(f"**Auth URL ที่จะใช้:**")
+        st.code(auth_url[:120] + "...")
+        st.markdown(f"[คลิกทดสอบ Login ตรงๆ]({auth_url})")
 
     if is_gdrive_token_ready():
         # แสดงชื่อ user ที่ login อยู่

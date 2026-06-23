@@ -920,7 +920,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "date": "วัน/เดือน/ปี",
   "time": "HH:MM",
   "branch": "ชื่อสาขา",
-  "pos_id": "รหัสสาขา 5 หลัก",
+  "pos_id": "รหัสสาขา 4-5 หลัก (ตัวเลขเท่านั้น ไม่ใช่ N02 หรือ POS code)",
   "rcpt_no": "เลขที่ใบเสร็จ",
   "total_amount": 0.0,
   "cash": 0.0,
@@ -937,6 +937,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 
 กฎสำคัญ:
 - items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม
+- pos_id: ต้องเป็นตัวเลข 4-5 หลักของสาขา (เช่น 2144) ไม่ใช่รหัส POS เครื่อง (เช่น N02)
 - total_amount: ยอดรวมหลังหักส่วนลด
 - cash: เงินที่จ่าย (เงินสด/QR)
 - change: เงินทอน
@@ -954,8 +955,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
             "pos_id":       str(data.get("pos_id", "ไม่พบ")),
             "rcpt_no":      str(data.get("rcpt_no", "ไม่พบ")),
             "total_amount": float(data.get("total_amount", 0)),
-            "cash":         float(data.get("cash", 0)),
-            "change":       float(data.get("change", 0)),
+            "cash":         0.0,
+            "change":       0.0,
             "tax_id":       "ไม่พบ",
             "user":         "ไม่พบ",
             "name":         "ไม่พบ",
@@ -1136,19 +1137,30 @@ def _find_rcpt_no(text: str, compact: str) -> str:
 
 def _find_pos_id(text: str, compact: str, lines: list) -> str:
     _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
+    # 1. หาจาก keyword สาขา + ตัวเลข 4-5 หลัก
     for line in lines[:12]:
         c = _collapse(line)
-        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(\d{5})', c, re.IGNORECASE)
-        if m: return m.group(1)
+        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(\d{4,5})', c, re.IGNORECASE)
+        if m:
+            val = m.group(1).lstrip('0') or m.group(1)
+            return val
+    # 2. หาจากบรรทัดที่มีชื่อร้าน (มอร์ / เจเอ / CJ / MORE)
     for line in lines[:12]:
         c = _collapse(line)
-        if re.search(r'มอร์|ม อ ร', line, re.IGNORECASE) or 'มอร์' in c:
-            nums = re.findall(r'\d{5}', c)
-            if nums: return nums[0]
-    m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{5})', compact, re.IGNORECASE)
-    if m: return m.group(1)
-    nums_all = re.findall(r'(?<!\d)\d{5}(?!\d)', compact)
-    if nums_all: return nums_all[0]
+        if re.search(r'มอร์|มอร|เจเอ|CJ|MORE', line, re.IGNORECASE) or 'มอร์' in c:
+            nums = re.findall(r'0?\d{4,5}(?!\d)', c)
+            if nums:
+                val = nums[0].lstrip('0') or nums[0]
+                return val
+    # 3. หาจาก compact ทั้งหมด
+    m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{4,5})', compact, re.IGNORECASE)
+    if m:
+        return m.group(1).lstrip('0') or m.group(1)
+    # 4. เลข 4-5 หลักทั่วไป (รองรับ 0 นำหน้าจาก OCR)
+    nums_all = re.findall(r'(?<!\d)0?\d{4,5}(?!\d)', compact)
+    if nums_all:
+        return nums_all[0].lstrip('0') or nums_all[0]
+    # 5. POS fallback — priority ต่ำสุด ไม่จับ N02 ขึ้นมาแทนสาขา
     for line in lines[:10]:
         c = _collapse(line)
         m = re.search(r'POS\s*[.\s]*NO\s*S?\s*(\d{1,2})\b', c, re.IGNORECASE)
@@ -1348,7 +1360,7 @@ def extract_receipt(text: str) -> dict:
             if len(candidate) >= 2: name = candidate; break
     return {
         "date": date_str, "time": time_val, "branch": branch, "name": name,
-        "total_amount": total, "cash": cash, "change": change,
+        "total_amount": total, "cash": 0.0, "change": 0.0,
         "pos_id": pos_id, "rcpt_no": rcpt_no, "tax_id": tax_id, "user": user,
     }
 
@@ -1403,7 +1415,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
     # รองรับทั้ง "1 ชื่อ" และ "- ชื่อ" (dash แทน qty)
-    _item_start = re.compile(r'^(?:\d+|-)\s+\S')
+    _item_start = re.compile(r'^(?:\d+|-)\s*\S')
     _kw_amount  = re.compile(
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
@@ -1464,15 +1476,16 @@ def _merge_gdrive_lines(lines: list) -> list:
 
     lines = _merge_kw_price(lines)
 
+    # ── แปลง HH:MM ที่จริงๆ คือราคา เช่น 10:00 → 10.00 ──
+    lines = [re.sub(r'\b(\d{1,2}):(\d{2})\b', lambda m: f"{m.group(1)}.{m.group(2)}", l) for l in lines]
+
     price_block_start = _find_price_block(lines)
 
     if price_block_start and price_block_start > 3:
         # ── รูปแบบ B: แยก block ──
-        # แยก names และ prices
         name_lines  = lines[:price_block_start]
         price_lines = lines[price_block_start:]
 
-        # เก็บเฉพาะชื่อสินค้า (บรรทัดที่เริ่มด้วยเลข qty หรือมีข้อความไทย)
         item_names = [l.strip() for l in name_lines
                       if l.strip() and not _price_only.match(l.strip())
                       and not _kw_amount.search(l.strip())
@@ -1516,7 +1529,7 @@ def _merge_gdrive_lines(lines: list) -> list:
         return header + merged
 
     else:
-        # ── รูปแบบ A: สลับกัน (เดิม) ──
+       # ── รูปแบบ A: สลับกัน (เดิม) ──
         merged = []
         i = 0
         while i < len(lines):
@@ -1536,6 +1549,10 @@ def _merge_gdrive_lines(lines: list) -> list:
                         part = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
                         if part: combined += " " + part
                         price_count += 1
+                        j += 1
+                    elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
+                        # ชื่อสินค้าแยก 2 บรรทัด เช่น "1 เจล" + "ปม โคล1269" → รวมเป็นชื่อเดียว
+                        combined += " " + nx
                         j += 1
                     else:
                         break
@@ -1575,10 +1592,10 @@ def extract_items_cj(text: str) -> list:
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
     # รองรับ qty เป็นตัวเลขหรือ "-"
     _QTY    = r'(?:\d+|-)'
-    _full  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _full = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$'
     _fb_a  = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    _fb_b  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    _fb_c  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})\s*$')
+    _fb_b = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_c = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s*$')
 
     for line in lines[start_idx:]:
         line = line.strip()
@@ -1666,12 +1683,11 @@ def build_excel(all_bills: list) -> bytes:
                             "จำนวน":it.get('จำนวน',1),
                             "ราคาต่อหน่วย":it.get('ราคาต่อหน่วย',0),
                             "ยอดรวมสินค้า":it.get('ยอดรวมสินค้า',0),
-                            "ยอดรวม":"","เงินสด":"","เงินทอน":""})
+                            "ยอดรวม":""})
                 rows.append(row)
             summary = base.copy()
             summary.update({"ชื่อสินค้า":"","จำนวน":"","ราคาต่อหน่วย":"","ยอดรวมสินค้า":"",
-                            "ยอดรวม":d['total_amount'],"เงินสด":d['cash'],
-                            "เงินทอน":d['change']})
+                            "ยอดรวม":d['total_amount']})
             rows.append(summary)
         pd.DataFrame(rows).to_excel(writer, index=False, sheet_name='ใบเสร็จ')
     return output.getvalue()
@@ -2054,11 +2070,11 @@ def run_batch_mode_ui():
         progress_bar.progress(1.0, text=t("batch_done")(len(results)))
         S.all_bills = results
         st.rerun()
+    # ── RESULTS ──
     if S.all_bills:
-        st.divider()
         st.success(t("found")(len(S.all_bills)))
         for idx, b in enumerate(S.all_bills):
-            with st.expander(f"📄 {b['filename']}", expanded=False):
+            with st.expander(f"📄 {b['filename']}", expanded=True):
                 ic, dc = st.columns([1,2])
                 with ic:
                     if b.get('image'): st.image(b['image'], use_container_width=True)
@@ -2066,47 +2082,45 @@ def run_batch_mode_ui():
                     d = b['bill']
                     st.markdown("**ตรวจสอบ / แก้ไข**")
                     r1 = st.columns(4)
-                    d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"bdt{idx}")
-                    d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"btm{idx}")
-                    d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"bps{idx}")
-                    d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"brc{idx}")
-                    r2 = st.columns(3)
-                    tot_str = r2[0].text_input("ยอดรวม",  f"{float(d['total_amount']):.2f}", key=f"btot{idx}")
-                    csh_str = r2[1].text_input("เงินสด",  f"{float(d['cash']):.2f}",         key=f"bcsh{idx}")
-                    chg_str = r2[2].text_input("เงินทอน", f"{float(d['change']):.2f}",        key=f"bchg{idx}")
+                    d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"dt{idx}")
+                    d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
+                    d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"ps{idx}")
+                    d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"rc{idx}")
+                    tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
                     d['total_amount'] = parse_price(tot_str)
-                    d['cash']         = parse_price(csh_str)
-                    d['change']       = parse_price(chg_str)
-                mc = st.columns(3)
-                mc[0].metric("💰 ยอดรวม",  f"{d['total_amount']:.2f} ฿")
-                mc[1].metric("💵 เงินสด",  f"{d['cash']:.2f} ฿")
-                mc[2].metric("🔄 เงินทอน", f"{d['change']:.2f} ฿")
+                st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
                     st.dataframe(pd.DataFrame(b['items']), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):
-                    gdrive_raw_b = b.get("gdrive_raw", "")
-                    if S.ocr_engine == "gdrive" and gdrive_raw_b:
+                    gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
+                    if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
                         st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
                         st.text_area(
                             "Google Doc raw",
-                            gdrive_raw_b,
+                            gdrive_raws[idx],
                             height=200,
-                            key=f"bgdraw{idx}",
+                            key=f"gdraw{idx}",
                             disabled=True,
                             help="นี่คือข้อความที่ Google Drive อ่านได้ก่อนที่แอปจะแก้ไข/จัดรูปแบบ"
                         )
                         st.markdown("---")
                         st.markdown("**🧹 หลัง clean_text (ส่งให้ parser)**")
-                    st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160, key=f"braw{idx}", disabled=True)
+                    st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160, key=f"raw{idx}", disabled=True)
                     st.json({k:v for k,v in b['bill'].items()})
         st.divider()
-        st.download_button(t("download"), data=build_excel(S.all_bills),
-                           file_name="receipts_batch.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           use_container_width=True)
+        dl_c, rs_c = st.columns([3,1])
+        with dl_c:
+            st.download_button(t("download"), data=build_excel(S.all_bills),
+                               file_name="receipts.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               use_container_width=True)
+        with rs_c:
+            if st.button(t("reset"), use_container_width=True):
+                for k,v in _DEFAULTS.items(): S[k]=v
+                st.rerun()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

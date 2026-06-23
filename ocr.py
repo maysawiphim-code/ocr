@@ -1475,6 +1475,12 @@ def _merge_gdrive_lines(lines: list) -> list:
         return out
 
     lines = _merge_kw_price(lines)
+# เพิ่มตรงนี้ก่อน loop "while i < len(lines):"
+# แปลง "HH:MM" ที่เป็นราคาจริง เช่น 10:00 → 10.00
+def _fix_time_as_price(s):
+    return re.sub(r'\b(\d{1,2}):(\d{2})\b', lambda m: f"{m.group(1)}.{m.group(2)}", s)
+
+lines = [_fix_time_as_price(l) for l in lines]
 
     price_block_start = _find_price_block(lines)
 

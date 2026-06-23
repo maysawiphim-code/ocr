@@ -981,7 +981,44 @@ def extract_items_with_gemini(raw_text: str) -> list:
     """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
     result = extract_with_gemini(raw_text)
     return result.get("items", [])
+def categorize_items_batch(items: list) -> list:
+    """ให้ Gemini จัดหมวดหมู่สินค้าทั้งหมดทีเดียว"""
+    if not items:
+        return []
+    names = [it.get("ชื่อสินค้า", "") for it in items]
+    if not is_gemini_configured():
+        return ["อื่นๆ"] * len(items)
+    try:
+        names_str = "\n".join(f"{i+1}. {n}" for i, n in enumerate(names))
+        prompt = f"""คุณคือผู้เชี่ยวชาญสินค้าในร้านสะดวกซื้อ CJ Express
+จัดหมวดหมู่สินค้าต่อไปนี้ให้ครบทุกรายการ:
 
+{names_str}
+
+หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 8 หมวดนี้เท่านั้น):
+1. อาหารพร้อมทานและเบเกอรี่
+2. อาหารกึ่งสำเร็จรูปและของทานเล่น
+3. เครื่องดื่ม
+4. ผลิตภัณฑ์นมและอาหารแช่แข็ง
+5. ของใช้ส่วนตัว
+6. ของใช้ในบ้านและเวชภัณฑ์
+7. บริการและสินค้าเบ็ดเตล็ด
+8. อื่นๆ
+
+กฎ:
+- ใช้ความรู้เกี่ยวกับสินค้าในร้านสะดวกซื้อไทยในการตัดสินใจ
+- ถ้าชื่อสินค้าไม่ชัดเจนให้เดาจากบริบท
+- ตอบเป็น JSON array เรียงตามลำดับเดิมเท่านั้น ไม่ต้องอธิบาย
+- ตัวอย่าง: ["เครื่องดื่ม","อาหารพร้อมทานและเบเกอรี่","ของใช้ส่วนตัว"]"""
+
+        result = _call_gemini(prompt, max_tokens=500).strip()
+        result = re.sub(r"```(?:json)?\s*|\s*```", "", result).strip()
+        cats = json.loads(result)
+        if isinstance(cats, list) and len(cats) == len(items):
+            return cats
+    except Exception:
+        pass
+    return ["อื่นๆ"] * len(items)
 
 def _collapse(text: str) -> str:
     return re.sub(r'\s+', '', text)
@@ -1677,16 +1714,20 @@ def build_excel(all_bills: list) -> bytes:
             base = {"ไฟล์":b['filename'],"วันที่":d['date'],"เวลา":d['time'],
                     "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],
                     "เลขที่ใบเสร็จ":d['rcpt_no']}
-            for it in (b['items'] or []):
+            items = b['items'] or []
+            categories = categorize_items_batch(items)
+            for it, cat in zip(items, categories):
                 row = base.copy()
                 row.update({"ชื่อสินค้า":it.get('ชื่อสินค้า',''),
+                            "หมวดหมู่":cat,
                             "จำนวน":it.get('จำนวน',1),
                             "ราคาต่อหน่วย":it.get('ราคาต่อหน่วย',0),
                             "ยอดรวมสินค้า":it.get('ยอดรวมสินค้า',0),
                             "ยอดรวม":""})
                 rows.append(row)
             summary = base.copy()
-            summary.update({"ชื่อสินค้า":"","จำนวน":"","ราคาต่อหน่วย":"","ยอดรวมสินค้า":"",
+            summary.update({"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":"",
+                            "ราคาต่อหน่วย":"","ยอดรวมสินค้า":"",
                             "ยอดรวม":d['total_amount']})
             rows.append(summary)
         pd.DataFrame(rows).to_excel(writer, index=False, sheet_name='ใบเสร็จ')
@@ -2091,7 +2132,12 @@ def run_batch_mode_ui():
                 st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
-                    st.dataframe(pd.DataFrame(b['items']), use_container_width=True, hide_index=True)
+                items_display = b['items'].copy() if isinstance(b['items'], list) else []
+                if items_display:
+                    cats = categorize_items_batch(items_display)
+                    for i, cat in enumerate(cats):
+                        items_display[i] = {**items_display[i], "หมวดหมู่": cat}
+                st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):
@@ -2516,35 +2562,25 @@ def main():
                     d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
                     d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"ps{idx}")
                     d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"rc{idx}")
-                    r2 = st.columns(3)
-                    tot_str = r2[0].text_input("ยอดรวม",  f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
-                    csh_str = r2[1].text_input("เงินสด",  f"{float(d['cash']):.2f}",         key=f"csh{idx}")
-                    chg_str = r2[2].text_input("เงินทอน", f"{float(d['change']):.2f}",        key=f"chg{idx}")
+                    tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
                     d['total_amount'] = parse_price(tot_str)
-                    d['cash']         = parse_price(csh_str)
-                    d['change']       = parse_price(chg_str)
-                mc = st.columns(3)
-                mc[0].metric("💰 ยอดรวม",  f"{d['total_amount']:.2f} ฿")
-                mc[1].metric("💵 เงินสด",  f"{d['cash']:.2f} ฿")
-                mc[2].metric("🔄 เงินทอน", f"{d['change']:.2f} ฿")
+                st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
-                    st.dataframe(pd.DataFrame(b['items']), use_container_width=True, hide_index=True)
+                    items_display = b['items'].copy()
+                    cats = categorize_items_batch(items_display)
+                    for i, cat in enumerate(cats):
+                        items_display[i] = {**items_display[i], "หมวดหมู่": cat}
+                    st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):
-                    # ── แสดงข้อความดิบจาก Google Doc (ก่อน clean_text) ──
                     gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
                     if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
                         st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
-                        st.text_area(
-                            "Google Doc raw",
-                            gdrive_raws[idx],
-                            height=200,
-                            key=f"gdraw{idx}",
-                            disabled=True,
-                            help="นี่คือข้อความที่ Google Drive อ่านได้ก่อนที่แอปจะแก้ไข/จัดรูปแบบ"
-                        )
+                        st.text_area("Google Doc raw", gdrive_raws[idx], height=200,
+                                     key=f"gdraw{idx}", disabled=True,
+                                     help="นี่คือข้อความที่ Google Drive อ่านได้ก่อนที่แอปจะแก้ไข/จัดรูปแบบ")
                         st.markdown("---")
                         st.markdown("**🧹 หลัง clean_text (ส่งให้ parser)**")
                     st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160, key=f"raw{idx}", disabled=True)

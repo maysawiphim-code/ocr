@@ -2525,31 +2525,31 @@ def main():
                     S.all_bills = all_bills; S.step=4; st.rerun()
 
     # ── RESULTS ──
+    # ── RESULTS ──
     if S.all_bills:
-    st.success(t("found")(len(S.all_bills)))
-    for idx, b in enumerate(S.all_bills):
-        with st.expander(f"📄 {b['filename']}", expanded=True):
-            ic, dc = st.columns([1,2])
-            with ic:
-                if b.get('image'): st.image(b['image'], use_container_width=True)
-            with dc:
-                d = b['bill']
-                st.markdown("**ตรวจสอบ / แก้ไข**")
-                r1 = st.columns(4)
-                d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"dt{idx}")
-                d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
-                d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"ps{idx}")
-                d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"rc{idx}")
-                tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
-                d['total_amount'] = parse_price(tot_str)
-            st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
+        st.success(t("found")(len(S.all_bills)))
+        for idx, b in enumerate(S.all_bills):
+            with st.expander(f"📄 {b['filename']}", expanded=True):
+                ic, dc = st.columns([1,2])
+                with ic:
+                    if b.get('image'): st.image(b['image'], use_container_width=True)
+                with dc:
+                    d = b['bill']
+                    st.markdown("**ตรวจสอบ / แก้ไข**")
+                    r1 = st.columns(4)
+                    d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"dt{idx}")
+                    d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
+                    d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"ps{idx}")
+                    d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"rc{idx}")
+                    tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
+                    d['total_amount'] = parse_price(tot_str)
+                st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
                     st.dataframe(pd.DataFrame(b['items']), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):
-                    # ── แสดงข้อความดิบจาก Google Doc (ก่อน clean_text) ──
                     gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
                     if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
                         st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
@@ -2576,7 +2576,5 @@ def main():
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
-
-
 if __name__ == "__main__":
     main()

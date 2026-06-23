@@ -2132,12 +2132,11 @@ def run_batch_mode_ui():
                 st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
-                items_display = b['items'].copy() if isinstance(b['items'], list) else []
-                if items_display:
+                    items_display = b['items'].copy()
                     cats = categorize_items_batch(items_display)
                     for i, cat in enumerate(cats):
                         items_display[i] = {**items_display[i], "หมวดหมู่": cat}
-                st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):

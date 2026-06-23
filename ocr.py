@@ -1538,19 +1538,27 @@ def _merge_gdrive_lines(lines: list) -> list:
                 i += 1
                 continue
             if _item_start.match(line) and _has_thai.search(line):
-                combined = line
-                j = i + 1
-                price_count = 0
-                while j < len(lines) and price_count < 2:
-                    nx = lines[j].strip()
-                    if not nx: break
-                    if _price_only.match(nx):
-                        part = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
-                        if part: combined += " " + part
-                        price_count += 1
-                        j += 1
-                    else:
-                        break
+    combined = line
+    j = i + 1
+    price_count = 0
+    while j < len(lines) and price_count < 2:
+        nx = lines[j].strip()
+        if not nx: break
+        if _price_only.match(nx):
+            part = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
+            if part: combined += " " + part
+            price_count += 1
+            j += 1
+        elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
+            # ชื่อสินค้าแยก 2 บรรทัด เช่น "1 เจล" + "ปม โคล1269" → รวมเป็นชื่อเดียว
+            combined += " " + nx
+            j += 1
+        else:
+            break
+    if price_count > 0:
+        merged.append(combined)
+        i = j
+        continue
                 if price_count > 0:
                     merged.append(combined)
                     i = j

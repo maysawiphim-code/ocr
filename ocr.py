@@ -37,6 +37,9 @@ if os.name == 'nt':
 
 st.set_page_config(page_title="CJ Express Receipt OCR Pro", layout="wide", page_icon="🧾")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CSS
+# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
 [data-testid="stAppViewContainer"] { background: #f8f7ff; }
@@ -59,6 +62,9 @@ div[data-testid="stButton"] button { border-radius:8px !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Session state
+# ─────────────────────────────────────────────────────────────────────────────
 _DEFAULTS = dict(step=1, bill_count=0,
                  gallery_files=[], selected_idx=-1,
                  crop_result=None, all_bills=[], lang="th",
@@ -72,6 +78,9 @@ for k, v in _DEFAULTS.items():
         st.session_state[k] = v
 S = st.session_state
 
+# ─────────────────────────────────────────────────────────────────────────────
+# UI Text (bilingual)
+# ─────────────────────────────────────────────────────────────────────────────
 TXT = {
     "th": dict(
         title="🧾 วิเคราะห์บิล CJ Express OCR Pro",
@@ -154,6 +163,9 @@ TXT = {
 }
 def t(key): return TXT[S.lang][key]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Step bar
+# ─────────────────────────────────────────────────────────────────────────────
 def render_steps():
     steps = t("steps")
     html = '<div class="step-bar">'
@@ -167,6 +179,9 @@ def render_steps():
             html += '<div class="step-line"></div>'
     st.markdown(html + '</div>', unsafe_allow_html=True)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Image utils
+# ─────────────────────────────────────────────────────────────────────────────
 def pil_to_cv(img): return cv2.cvtColor(np.array(img.convert("RGB")), cv2.COLOR_RGB2BGR)
 def cv_to_pil(img): return Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
@@ -194,20 +209,27 @@ def find_paper_contours(img_cv, min_area_frac=0.015):
     results.sort(key=lambda r: r[0][0])
     return results, mask
 
+
 def deskew_paper(img_cv, contour, pad=10):
     H, W = img_cv.shape[:2]
     rect = cv2.minAreaRect(contour)
     (cx, cy), (rw, rh), angle = rect
-    if rw > rh: rw, rh = rh, rw; angle += 90
+    if rw > rh:
+        rw, rh = rh, rw
+        angle += 90
     box = cv2.boxPoints(rect).astype(np.float32)
     out_w, out_h = max(int(rw) + pad * 2, 10), max(int(rh) + pad * 2, 10)
-    s = box.sum(axis=1); diff = np.diff(box, axis=1).flatten()
+    s = box.sum(axis=1)
+    diff = np.diff(box, axis=1).flatten()
     tl, br = box[np.argmin(s)], box[np.argmax(s)]
     tr, bl = box[np.argmin(diff)], box[np.argmax(diff)]
     src_pts = np.array([tl, tr, br, bl], dtype=np.float32)
-    dst_pts = np.array([[pad,pad],[out_w-pad,pad],[out_w-pad,out_h-pad],[pad,out_h-pad]], dtype=np.float32)
+    dst_pts = np.array([
+        [pad, pad], [out_w - pad, pad],
+        [out_w - pad, out_h - pad], [pad, out_h - pad]
+    ], dtype=np.float32)
     M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-    warped = cv2.warpPerspective(img_cv, M, (out_w, out_h), borderValue=(255,255,255))
+    warped = cv2.warpPerspective(img_cv, M, (out_w, out_h), borderValue=(255, 255, 255))
     mask_full = np.zeros((H, W), dtype=np.uint8)
     cv2.drawContours(mask_full, [contour], -1, 255, thickness=cv2.FILLED)
     warped_mask = cv2.warpPerspective(mask_full, M, (out_w, out_h), borderValue=0)
@@ -215,15 +237,18 @@ def deskew_paper(img_cv, contour, pad=10):
     warped_mask = cv2.dilate(warped_mask, kernel, iterations=1)
     return warped, warped_mask
 
+
 def correct_illumination(gray):
     kernel_size = max(gray.shape) // 15
     kernel_size = kernel_size if kernel_size % 2 == 1 else kernel_size + 1
     kernel_size = max(kernel_size, 3)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     background = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-    gray_f = gray.astype(np.float32); bg_f = background.astype(np.float32) + 1e-6
+    gray_f = gray.astype(np.float32)
+    bg_f = background.astype(np.float32) + 1e-6
     corrected = (gray_f / bg_f) * 255
     return np.clip(corrected, 0, 255).astype(np.uint8)
+
 
 def whiten_background(img_cv, contour=None, bbox=None, pad=6, deskew=True):
     H, W = img_cv.shape[:2]
@@ -251,12 +276,15 @@ def whiten_background(img_cv, contour=None, bbox=None, pad=6, deskew=True):
     clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
     return clahe.apply(gray)
 
+
 def auto_crop_receipts(img_cv, n_expected=None, deskew=True):
     results, mask = find_paper_contours(img_cv)
     h, w = img_cv.shape[:2]
-    if not results: return [img_cv]
+    if not results:
+        return [img_cv]
     if n_expected and len(results) != n_expected:
-        if abs(len(results) - n_expected) > 1: return [img_cv]
+        if abs(len(results) - n_expected) > 1:
+            return [img_cv]
     crops = []
     for bbox, contour in results:
         if deskew:
@@ -266,55 +294,77 @@ def auto_crop_receipts(img_cv, n_expected=None, deskew=True):
             composited = np.where(mask_3ch > 0, warped, white_bg)
             crops.append(composited)
         else:
-            x, y, cw, ch = bbox; pad = 6
-            x0, y0 = max(x-pad,0), max(y-pad,0)
-            x1, y1 = min(x+cw+pad,w), min(y+ch+pad,h)
+            x, y, cw, ch = bbox
+            pad = 6
+            x0, y0 = max(x - pad, 0), max(y - pad, 0)
+            x1, y1 = min(x + cw + pad, w), min(y + ch + pad, h)
             crops.append(img_cv[y0:y1, x0:x1])
     return crops if crops else [img_cv]
 
+
 def preprocess_image(img_cv, whiten=True):
-    if whiten: gray = whiten_background(img_cv)
-    else: gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+    if whiten:
+        gray = whiten_background(img_cv)
+    else:
+        gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
     gray = cv2.fastNlMeansDenoising(gray, h=10)
     blur = cv2.GaussianBlur(gray, (0, 0), 3)
     gray = cv2.addWeighted(gray, 1.5, blur, -0.5, 0)
-    return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
+    return cv2.adaptiveThreshold(gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 31, 15)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Bill split utils
+# ─────────────────────────────────────────────────────────────────────────────
 def _find_bill_splits(col_ratio, w, min_bill_frac=0.15, n_expected=None):
     kernel = np.ones(5) / 5
     smooth = np.convolve(col_ratio, kernel, mode='same')
     thr_outer = max(0.03, smooth.max() * 0.05)
     content_cols = np.where(smooth > thr_outer)[0]
-    if len(content_cols) == 0: return [], smooth, smooth.mean()
-    x0 = max(content_cols[0] - 5, 0); x1 = min(content_cols[-1] + 5, w-1)
+    if len(content_cols) == 0:
+        return [], smooth, smooth.mean()
+    x0 = max(content_cols[0]  - 5, 0)
+    x1 = min(content_cols[-1] + 5, w-1)
     region_w = x1 - x0
-    if region_w <= 0: return [], smooth, smooth.mean()
-    seg = smooth[x0:x1]; max_v = seg.max()
+    if region_w <= 0:
+        return [], smooth, smooth.mean()
+    seg = smooth[x0:x1]
+    max_v = seg.max()
+
     def _candidates(gap_ratio):
-        gap_thr = max_v * gap_ratio; grad = np.gradient(seg)
+        gap_thr = max_v * gap_ratio
+        grad = np.gradient(seg)
         return [(i, float(seg[i])) for i in range(3, len(seg)-3)
                 if grad[i-1] <= 0 and grad[i+1] >= 0 and seg[i] < gap_thr]
+
     def _select_best(candidates, min_bw, n_keep=None):
-        ordered = sorted(candidates, key=lambda x: x[1]); chosen = []
+        ordered = sorted(candidates, key=lambda x: x[1])
+        chosen = []
         for pos, val in ordered:
             if pos < min_bw or pos > region_w - min_bw: continue
-            if all(abs(pos - p) >= min_bw for p in chosen): chosen.append(pos)
+            if all(abs(pos - p) >= min_bw for p in chosen):
+                chosen.append(pos)
             if n_keep and len(chosen) >= n_keep: break
         return sorted(chosen)
+
     min_bw = max(int(region_w * min_bill_frac), 8)
     target_n = (n_expected - 1) if n_expected else None
-    candidates = _candidates(0.55); splits_rel = _select_best(candidates, min_bw, n_keep=target_n)
+    candidates = _candidates(0.55)
+    splits_rel = _select_best(candidates, min_bw, n_keep=target_n)
     if n_expected and len(splits_rel) < target_n:
         for gap_ratio in (0.65, 0.75, 0.85, 0.92):
             wider_min_bw = max(int(region_w * max(min_bill_frac * 0.7, 0.10)), 8)
             attempt_candidates = _candidates(gap_ratio)
             attempt = _select_best(attempt_candidates, wider_min_bw, n_keep=target_n)
-            if len(attempt) > len(splits_rel): splits_rel = attempt
-            if len(splits_rel) >= target_n: break
+            if len(attempt) > len(splits_rel):
+                splits_rel = attempt
+            if len(splits_rel) >= target_n:
+                break
     splits_abs = [x0 + p for p in splits_rel]
     mean_v = float(seg.mean())
     return splits_abs, smooth, mean_v
+
 
 def split_receipts_image(img_cv, n_expected=None):
     h, w = img_cv.shape[:2]
@@ -323,41 +373,83 @@ def split_receipts_image(img_cv, n_expected=None):
     splits, smooth, mean_val = _find_bill_splits(col_ratio, w, n_expected=n_expected)
     thr_outer = max(0.03, smooth.max() * 0.05)
     content = np.where(smooth > thr_outer)[0]
-    x_start = max(content[0] - 5, 0) if len(content) else 0
+    x_start = max(content[0]  - 5, 0)   if len(content) else 0
     x_end   = min(content[-1] + 5, w-1) if len(content) else w-1
-    bounds = [x_start] + splits + [x_end]; crops = []
+    bounds = [x_start] + splits + [x_end]
+    crops  = []
     min_cw = max(int(w * 0.08), 20)
     for i in range(len(bounds)-1):
         xa, xb = bounds[i], bounds[i+1]
         if (xb - xa) < min_cw: continue
-        seg = smooth[xa:xb]; content_seg = np.where(seg > thr_outer)[0]
+        seg = smooth[xa:xb]
+        content_seg = np.where(seg > thr_outer)[0]
         if len(content_seg) == 0: continue
-        ca = max(xa + content_seg[0] - 3, 0); cb = min(xa + content_seg[-1] + 3, w-1)
-        if (cb - ca) >= min_cw: crops.append(img_cv[:, ca:cb+1])
+        ca = max(xa + content_seg[0]  - 3, 0)
+        cb = min(xa + content_seg[-1] + 3, w-1)
+        if (cb - ca) >= min_cw:
+            crops.append(img_cv[:, ca:cb+1])
     return crops if crops else [img_cv]
+
 
 def split_by_positions(img_cv, split_px_list):
     h, w = img_cv.shape[:2]
     pts = sorted(set(int(p) for p in split_px_list if 0 < p < w))
-    if not pts: return [img_cv]
-    bounds = [0] + pts + [w]; crops = []
+    if not pts:
+        return [img_cv]
+    bounds = [0] + pts + [w]
+    crops = []
     for i in range(len(bounds)-1):
         xa, xb = bounds[i], bounds[i+1]
         if xb - xa < 5: continue
         crops.append(img_cv[:, xa:xb])
     return crops if crops else [img_cv]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ██  Google Drive OCR — Web OAuth Flow (รองรับ Streamlit Cloud / multi-user)  ██
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# หลักการ:
+#   แต่ละ user กด "Login Google" → redirect ไปหน้า Google consent
+#   → Google redirect กลับพร้อม ?code=... ใน URL
+#   → แอปจับ code แลก access_token → เก็บใน st.session_state ของ user นั้น
+#   → ใช้ token อัปโหลดรูป OCR บน Drive ของ user → ลบทันที
+#   → แต่ละ user ใช้ Drive ของตัวเอง (15GB ฟรี) ไม่ปนกัน
+#
+# วิธีตั้งค่า (ทำครั้งเดียวโดย admin):
+#   1. https://console.cloud.google.com → APIs & Services → Credentials
+#   2. + CREATE CREDENTIALS → OAuth client ID
+#      - Application type: Web application
+#      - Authorized redirect URIs: ใส่ URL ของ Streamlit app
+#        เช่น https://your-app.streamlit.app/
+#        หรือ http://localhost:8501/ สำหรับรันในเครื่อง
+#   3. คัดลอก Client ID และ Client Secret
+#   4. ใส่ใน .streamlit/secrets.toml:
+#        [gdrive]
+#        client_id     = "xxx.apps.googleusercontent.com"
+#        client_secret = "GOCSPX-xxx"
+#        redirect_uri  = "https://your-app.streamlit.app/"
+#      หรือตั้งเป็น environment variables:
+#        GDRIVE_CLIENT_ID / GDRIVE_CLIENT_SECRET / GDRIVE_REDIRECT_URI
+# ─────────────────────────────────────────────────────────────────────────────
+
 _GDRIVE_SCOPES    = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
 _GDRIVE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 _GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
+
 def _gdrive_client_config() -> dict:
+    """
+    อ่าน OAuth client config จาก st.secrets หรือ environment variables
+    strip() ทุกค่าเพื่อกัน newline/whitespace ที่แอบซ่อนอยู่
+    """
     try:
         cfg = st.secrets.get("gdrive", {})
         return {
             "client_id":     cfg.get("client_id",     os.environ.get("GDRIVE_CLIENT_ID", "")).strip(),
             "client_secret": cfg.get("client_secret", os.environ.get("GDRIVE_CLIENT_SECRET", "")).strip(),
-            "redirect_uri":  cfg.get("redirect_uri",  os.environ.get("GDRIVE_REDIRECT_URI", "http://localhost:8501/")).strip(),
+            "redirect_uri":  cfg.get("redirect_uri",  os.environ.get("GDRIVE_REDIRECT_URI",
+                                                                       "http://localhost:8501/")).strip(),
         }
     except Exception:
         return {
@@ -366,125 +458,235 @@ def _gdrive_client_config() -> dict:
             "redirect_uri":  os.environ.get("GDRIVE_REDIRECT_URI", "http://localhost:8501/").strip(),
         }
 
+
 def is_gdrive_configured() -> bool:
-    if not _GDRIVE_AVAILABLE: return False
+    """True ถ้าตั้งค่า client_id และ client_secret แล้ว"""
+    if not _GDRIVE_AVAILABLE:
+        return False
     cfg = _gdrive_client_config()
     return bool(cfg["client_id"] and cfg["client_secret"])
 
+
 def is_gdrive_token_ready() -> bool:
-    import time
+    """True ถ้า user ใน session นี้ login แล้วและ token ยังใช้ได้"""
     token = st.session_state.get("gdrive_token")
-    if not token: return False
+    if not token:
+        return False
+    # เช็ค expiry (ถ้ามี)
+    import time
     expires_at = st.session_state.get("gdrive_token_expires_at", 0)
-    if expires_at and time.time() > expires_at - 60: return False
+    if expires_at and time.time() > expires_at - 60:
+        return False  # หมดอายุแล้ว (หรือจะหมดใน 60 วิ)
     return True
 
+
 def gdrive_get_auth_url() -> str:
+    """สร้าง URL สำหรับ redirect ไปหน้า Google consent"""
     import urllib.parse, secrets as _sec
-    cfg = _gdrive_client_config(); state = _sec.token_urlsafe(16)
+    cfg = _gdrive_client_config()
+    state = _sec.token_urlsafe(16)
+    # เก็บ state ทั้งใน session_state และ cookie ผ่าน query params
     st.session_state["gdrive_oauth_state"] = state
-    params = {"client_id": cfg["client_id"], "redirect_uri": cfg["redirect_uri"],
-              "response_type": "code", "scope": _GDRIVE_SCOPES,
-              "access_type": "offline", "prompt": "consent", "state": state}
+    params = {
+        "client_id":     cfg["client_id"],
+        "redirect_uri":  cfg["redirect_uri"],
+        "response_type": "code",
+        "scope":         _GDRIVE_SCOPES,
+        "access_type":   "offline",
+        "prompt":        "consent",
+        "state":         state,
+    }
     return f"{_GDRIVE_AUTH_URL}?{urllib.parse.urlencode(params)}"
 
+
 def gdrive_exchange_code(code: str) -> bool:
+    """
+    แลก authorization code → access_token + refresh_token
+    บันทึกใน st.session_state ของ user นี้
+    คืน True ถ้าสำเร็จ
+    """
     import requests as _req, time
     cfg = _gdrive_client_config()
     try:
         resp = _req.post(_GDRIVE_TOKEN_URL, data={
-            "code": code, "client_id": cfg["client_id"],
-            "client_secret": cfg["client_secret"], "redirect_uri": cfg["redirect_uri"],
-            "grant_type": "authorization_code"}, timeout=15)
-        resp.raise_for_status(); data = resp.json()
+            "code":          code,
+            "client_id":     cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "redirect_uri":  cfg["redirect_uri"],
+            "grant_type":    "authorization_code",
+        }, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
         st.session_state["gdrive_token"]            = data["access_token"]
         st.session_state["gdrive_refresh_token"]    = data.get("refresh_token", "")
         st.session_state["gdrive_token_expires_at"] = time.time() + data.get("expires_in", 3600)
         return True
     except Exception as e:
-        st.session_state["gdrive_auth_error"] = str(e); return False
+        st.session_state["gdrive_auth_error"] = str(e)
+        return False
+
 
 def gdrive_refresh_token_if_needed() -> bool:
+    """
+    Refresh access_token ถ้าหมดอายุ
+    คืน True ถ้า token ยังใช้ได้ (ไม่ว่าจะ refresh หรือไม่ก็ตาม)
+    """
     import requests as _req, time
-    if is_gdrive_token_ready(): return True
+    if is_gdrive_token_ready():
+        return True
     refresh_token = st.session_state.get("gdrive_refresh_token", "")
-    if not refresh_token: return False
+    if not refresh_token:
+        return False
     cfg = _gdrive_client_config()
     try:
         resp = _req.post(_GDRIVE_TOKEN_URL, data={
-            "refresh_token": refresh_token, "client_id": cfg["client_id"],
-            "client_secret": cfg["client_secret"], "grant_type": "refresh_token"}, timeout=15)
-        resp.raise_for_status(); data = resp.json()
+            "refresh_token": refresh_token,
+            "client_id":     cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "grant_type":    "refresh_token",
+        }, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
         st.session_state["gdrive_token"]            = data["access_token"]
         st.session_state["gdrive_token_expires_at"] = time.time() + data.get("expires_in", 3600)
         return True
     except Exception:
+        # refresh ไม่ได้ → ต้อง login ใหม่
         st.session_state.pop("gdrive_token", None)
         st.session_state.pop("gdrive_refresh_token", None)
         return False
 
+
 def gdrive_get_user_info() -> dict:
+    """ดึงชื่อ/email ของ user ที่ login อยู่ (แสดงใน UI)"""
     import requests as _req
     token = st.session_state.get("gdrive_token", "")
-    if not token: return {}
+    if not token:
+        return {}
     try:
-        resp = _req.get("https://www.googleapis.com/oauth2/v2/userinfo",
-                        headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        resp = _req.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
         return resp.json() if resp.ok else {}
-    except Exception: return {}
+    except Exception:
+        return {}
+
 
 def run_ocr_google_drive(crop_cv) -> str:
+    """
+    OCR ด้วย Google Drive ของ user ที่ login อยู่:
+    1. ใช้ access_token จาก session (refresh อัตโนมัติถ้าหมดอายุ)
+    2. อัปโหลดรูปเป็น Google Doc (Google OCR)
+    3. export plain text แล้วลบไฟล์ + ล้าง Trash ทันที
+    """
     import requests as _req
+
+    # refresh token ถ้าจำเป็น
     if not gdrive_refresh_token_if_needed():
         raise RuntimeError("กรุณา Login Google Drive ก่อนใช้งาน")
+
     token = st.session_state["gdrive_token"]
+
+    # เตรียมภาพ
     gray = whiten_background(crop_cv)
     img_color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     ok, buf = cv2.imencode(".jpg", img_color, [cv2.IMWRITE_JPEG_QUALITY, 92])
-    if not ok: raise RuntimeError("แปลงภาพเป็น JPEG ไม่สำเร็จ")
+    if not ok:
+        raise RuntimeError("แปลงภาพเป็น JPEG ไม่สำเร็จ")
     jpg_bytes = buf.tobytes()
+
     headers = {"Authorization": f"Bearer {token}"}
-    metadata = json.dumps({"name": "_ocr_tmp", "mimeType": "application/vnd.google-apps.document"}).encode()
+
+    # ── อัปโหลด multipart: metadata + image → Google OCR → Doc ──
+    import email.mime.multipart, email.mime.base, email.mime.application
+    metadata = json.dumps({
+        "name": "_ocr_tmp",
+        "mimeType": "application/vnd.google-apps.document",
+    }).encode()
+
     boundary = "OCR_BOUNDARY_XYZ"
-    body = (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n".encode()
-            + metadata
-            + f"\r\n--{boundary}\r\nContent-Type: image/jpeg\r\n\r\n".encode()
-            + jpg_bytes + f"\r\n--{boundary}--".encode())
+    body = (
+        f"--{boundary}\r\n"
+        f"Content-Type: application/json; charset=UTF-8\r\n\r\n"
+    ).encode() + metadata + (
+        f"\r\n--{boundary}\r\n"
+        f"Content-Type: image/jpeg\r\n\r\n"
+    ).encode() + jpg_bytes + f"\r\n--{boundary}--".encode()
+
     upload_resp = _req.post(
         "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id",
         headers={**headers, "Content-Type": f"multipart/related; boundary={boundary}"},
-        data=body, timeout=60)
-    upload_resp.raise_for_status(); doc_id = upload_resp.json()["id"]
+        data=body,
+        timeout=60,
+    )
+    upload_resp.raise_for_status()
+    doc_id = upload_resp.json()["id"]
+
     raw_text = ""
     try:
+        # export เป็น plain text
         export_resp = _req.get(
             f"https://www.googleapis.com/drive/v3/files/{doc_id}/export",
-            params={"mimeType": "text/plain"}, headers=headers, timeout=30)
+            params={"mimeType": "text/plain"},
+            headers=headers,
+            timeout=30,
+        )
         export_resp.raise_for_status()
+        # บังคับ decode เป็น UTF-8 เสมอ (Google Drive export ส่งมาเป็น UTF-8)
+        # ถ้าไม่ระบุ requests จะเดา encoding เองและมักผิดสำหรับภาษาไทย
         raw_text = export_resp.content.decode("utf-8")
     finally:
-        try: _req.delete(f"https://www.googleapis.com/drive/v3/files/{doc_id}", headers=headers, timeout=10)
-        except Exception: pass
-        try: _req.delete("https://www.googleapis.com/drive/v3/files/trash", headers=headers, timeout=10)
-        except Exception: pass
+        # ลบไฟล์ทันที
+        try:
+            _req.delete(
+                f"https://www.googleapis.com/drive/v3/files/{doc_id}",
+                headers=headers, timeout=10,
+            )
+        except Exception:
+            pass
+        # ล้าง Trash เพื่อคืน quota
+        try:
+            _req.delete(
+                "https://www.googleapis.com/drive/v3/files/trash",
+                headers=headers, timeout=10,
+            )
+        except Exception:
+            pass
+
+    # เก็บ raw text ไว้แสดงใน debug UI
     if "_gdrive_raw_texts" not in st.session_state:
         st.session_state["_gdrive_raw_texts"] = []
     st.session_state["_gdrive_raw_texts"].append(raw_text)
+
     return clean_text(raw_text) if raw_text.strip() else ""
 
+
 def render_gdrive_login_ui():
+    """
+    แสดง UI สำหรับ Login/Logout Google Drive
+    เรียกจาก settings expander และจาก main() เพื่อจับ OAuth callback
+    """
+    # ── จับ OAuth callback (code ใน query params) ──
     params = st.query_params
     if "code" in params and "gdrive_token" not in st.session_state:
-        code  = params["code"]; state = params.get("state", "")
+        code  = params["code"]
+        state = params.get("state", "")
+        # ตรวจ state เพื่อป้องกัน CSRF
         if state == st.session_state.get("gdrive_oauth_state", ""):
             with st.spinner("กำลัง Login..."):
                 ok = gdrive_exchange_code(code)
-            if ok: st.query_params.clear(); st.rerun()
+            if ok:
+                st.query_params.clear()
+                st.rerun()
             else:
                 err = st.session_state.pop("gdrive_auth_error", "unknown error")
                 st.error(f"Login ไม่สำเร็จ: {err}")
-        else: st.warning("OAuth state ไม่ตรง — กรุณาลอง Login ใหม่")
+        else:
+            st.warning("OAuth state ไม่ตรง — กรุณาลอง Login ใหม่")
         st.query_params.clear()
+
     if not is_gdrive_configured():
         st.warning(
             "⚠️ ยังไม่ได้ตั้งค่า OAuth Client\n\n"
@@ -492,192 +694,209 @@ def render_gdrive_login_ui():
             "1. https://console.cloud.google.com → APIs & Services → Credentials\n"
             "2. **+ CREATE CREDENTIALS** → **OAuth client ID** → Web application\n"
             "3. Authorized redirect URIs: ใส่ URL ของ Streamlit app\n"
-            "4. ใส่ใน `.streamlit/secrets.toml`:\n"
-            "```toml\n[gdrive]\nclient_id = \"xxx\"\nclient_secret = \"xxx\"\nredirect_uri = \"https://your-app.streamlit.app/\"\n```"
-        ); return
+            "   - รันในเครื่อง: `http://localhost:8501/`\n"
+            "   - Streamlit Cloud: `https://your-app.streamlit.app/`\n"
+            "4. คัดลอก Client ID และ Client Secret\n"
+            "5. ใส่ใน `.streamlit/secrets.toml`:\n"
+            "```toml\n"
+            "[gdrive]\n"
+            'client_id     = "xxx.apps.googleusercontent.com"\n'
+            'client_secret = "GOCSPX-xxx"\n'
+            'redirect_uri  = "https://your-app.streamlit.app/"\n'
+            "```"
+        )
+        return
+
+    # ── debug: แสดงค่าที่อ่านได้จริง ──
     cfg = _gdrive_client_config()
     with st.expander("🔍 Debug — ค่าที่อ่านได้จาก secrets", expanded=False):
-        st.code(f'client_id = "{cfg["client_id"]}"\nclient_secret = "{cfg["client_secret"][:8]}..."\nredirect_uri = "{cfg["redirect_uri"]}"')
+        st.code(f"""client_id     = "{cfg['client_id']}"
+client_secret = "{cfg['client_secret'][:8]}..."
+redirect_uri  = "{cfg['redirect_uri']}"
+client_id length = {len(cfg['client_id'])}
+has newline in client_id = {chr(10) in cfg['client_id']}""")
         auth_url = gdrive_get_auth_url()
+        st.markdown(f"**Auth URL ที่จะใช้:**")
+        st.code(auth_url[:120] + "...")
         st.markdown(f"[คลิกทดสอบ Login ตรงๆ]({auth_url})")
+
     if is_gdrive_token_ready():
+        # แสดงชื่อ user ที่ login อยู่
         info = gdrive_get_user_info()
-        name = info.get("name",""); email = info.get("email",""); pic = info.get("picture","")
+        name  = info.get("name", "")
+        email = info.get("email", "")
+        pic   = info.get("picture", "")
         col_pic, col_info = st.columns([1, 4])
-        if pic: col_pic.image(pic, width=48)
+        if pic:
+            col_pic.image(pic, width=48)
         col_info.success(f"✅ Login แล้ว: **{name}** ({email})\nไฟล์ OCR จะขึ้นที่ Drive ของคุณและถูกลบอัตโนมัติ")
         if st.button("🔓 Logout", key="gdrive_logout_btn"):
-            for k in ["gdrive_token","gdrive_refresh_token","gdrive_token_expires_at","gdrive_oauth_state"]:
+            for k in ["gdrive_token","gdrive_refresh_token",
+                      "gdrive_token_expires_at","gdrive_oauth_state"]:
                 st.session_state.pop(k, None)
             st.rerun()
     else:
         auth_url = gdrive_get_auth_url()
         st.info("🔑 กดปุ่มด้านล่างเพื่อ Login Google Drive")
+        # ปุ่ม Login
         st.markdown(
-            f'<a href="{auth_url}" target="_self" style="display:inline-block;padding:10px 24px;'
-            f'background:#4285F4;color:white;border-radius:8px;text-decoration:none;font-weight:600;font-size:15px">'
-            f'🔐 Login ด้วย Google Drive</a>', unsafe_allow_html=True)
+            f"""<a href="{auth_url}" target="_self"
+               style="display:inline-block;padding:10px 24px;background:#4285F4;
+                      color:white;border-radius:8px;text-decoration:none;
+                      font-weight:600;font-size:15px">
+               🔐 Login ด้วย Google Drive
+            </a>""",
+            unsafe_allow_html=True,
+        )
+
+        # ── fallback: วาง code เองกรณี redirect มีปัญหา ──
         with st.expander("⚙️ Login ด้วยตัวเอง (ถ้าปุ่มด้านบนไม่ทำงาน)"):
-            st.markdown(f"1. กดลิงก์นี้: **[คลิกที่นี่เพื่อ Login]({auth_url})**\n\n2. Login และกด Allow\n\n3. Copy ค่าหลัง `?code=` จนถึง `&` แรก มาวางด้านล่าง:")
-            manual_code = st.text_input("วาง Authorization Code:", key="gdrive_manual_code", placeholder="4/0AX4XfWh...")
+            st.markdown(
+                "1. กดลิงก์นี้เพื่อเปิดหน้า Google Login:\n\n"
+                f"**[คลิกที่นี่เพื่อ Login]({auth_url})**\n\n"
+                "2. Login และกด Allow\n\n"
+                "3. Browser จะ redirect ไปหน้าว่างหรือ error — **ดู URL ใน address bar**\n\n"
+                "4. Copy เฉพาะค่าหลัง `?code=` จนถึง `&` แรก มาวางด้านล่างนี้:"
+            )
+            manual_code = st.text_input(
+                "วาง Authorization Code ที่ได้จาก URL ที่นี่:",
+                key="gdrive_manual_code",
+                placeholder="4/0AX4XfWh...",
+            )
             if st.button("✅ ยืนยัน Code", key="gdrive_manual_submit", type="primary"):
                 if manual_code.strip():
                     with st.spinner("กำลัง Login..."):
                         ok = gdrive_exchange_code(manual_code.strip())
-                    if ok: st.success("✅ Login สำเร็จ!"); st.rerun()
+                    if ok:
+                        st.success("✅ Login สำเร็จ!")
+                        st.rerun()
                     else:
                         err = st.session_state.pop("gdrive_auth_error", "unknown")
                         st.error(f"Login ไม่สำเร็จ: {err}")
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Google Cloud Vision API
+# ─────────────────────────────────────────────────────────────────────────────
 _VISION_API_KEY = os.environ.get("GOOGLE_VISION_API_KEY", "")
-def is_vision_api_configured() -> bool: return bool(_VISION_API_KEY.strip())
+
+def is_vision_api_configured() -> bool:
+    return bool(_VISION_API_KEY.strip())
+
 
 def run_ocr_google_vision(crop_cv) -> str:
     import requests
-    if not is_vision_api_configured(): raise RuntimeError("ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
-    gray = whiten_background(crop_cv); img_for_api = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    if not is_vision_api_configured():
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
+    gray = whiten_background(crop_cv)
+    img_for_api = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
     success, buf = cv2.imencode(".png", img_for_api)
-    if not success: raise RuntimeError("แปลงภาพเป็น PNG ไม่สำเร็จ")
+    if not success:
+        raise RuntimeError("แปลงภาพเป็น PNG ไม่สำเร็จ")
     image_b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
     url = f"https://vision.googleapis.com/v1/images:annotate?key={_VISION_API_KEY}"
-    payload = {"requests": [{"image": {"content": image_b64},
-               "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
-               "imageContext": {"languageHints": ["th", "en"]}}]}
-    resp = requests.post(url, json=payload, timeout=30); resp.raise_for_status()
-    data = resp.json(); resp0 = data.get("responses", [{}])[0]
-    if "error" in resp0: raise RuntimeError(f"Google Vision API error: {resp0['error'].get('message', resp0['error'])}")
+    payload = {
+        "requests": [{
+            "image": {"content": image_b64},
+            "features": [{"type": "DOCUMENT_TEXT_DETECTION"}],
+            "imageContext": {"languageHints": ["th", "en"]},
+        }]
+    }
+    resp = requests.post(url, json=payload, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+    resp0 = data.get("responses", [{}])[0]
+    if "error" in resp0:
+        raise RuntimeError(f"Google Vision API error: {resp0['error'].get('message', resp0['error'])}")
     full_text = resp0.get("fullTextAnnotation", {}).get("text", "")
     return clean_text(full_text) if full_text else ""
 
+
 def run_ocr(crop_cv, engine: str = "tesseract"):
+    """
+    engine:
+      "tesseract"  — ฟรี, รันในเครื่อง (ค่าเริ่มต้น)
+      "gdrive"     — Google Drive OCR (ฟรี, แม่นกว่า Tesseract) ← ใหม่!
+      "vision"     — Google Cloud Vision API (แม่นสุด, มีค่าใช้จ่ายเมื่อเกิน free tier)
+    ทุก engine มี fallback กลับ Tesseract อัตโนมัติถ้าเกิด error
+    """
     if engine == "gdrive":
         try:
             text = run_ocr_google_drive(crop_cv)
-            if text: return text
+            if text:
+                return text
         except Exception as e:
             st.session_state.setdefault("_gdrive_warning", str(e))
+
     if engine == "vision":
         try:
             text = run_ocr_google_vision(crop_cv)
-            if text: return text
+            if text:
+                return text
         except Exception as e:
             st.session_state.setdefault("_vision_api_warning", str(e))
+
+    # Tesseract fallback
     try:
-        text = pytesseract.image_to_string(preprocess_image(crop_cv), lang='tha+eng', config='--psm 6')
+        text = pytesseract.image_to_string(
+            preprocess_image(crop_cv), lang='tha+eng', config='--psm 6')
         return clean_text(text)
     except Exception as e:
         return f"[OCR ERROR] {e}"
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Gemini API
+# ██  Gemini API — วิเคราะห์บิลจาก raw text  ██
 # ─────────────────────────────────────────────────────────────────────────────
+# วิธีตั้งค่า:
+# 1. ไปที่ https://aistudio.google.com/app/apikey
+# 2. กด "Create API key" → คัดลอก key
+# 3. ใส่ใน .streamlit/secrets.toml:
+#    GEMINI_API_KEY = "AIzaSy..."
+# ฟรี: 1,500 requests/วัน, 1M tokens/นาที (Gemini 2.0 Flash)
+# ─────────────────────────────────────────────────────────────────────────────
+
 _GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-# ══════════════════════════════════════════════════════════
-# ██  เพิ่มใหม่: แยกประเภทสินค้า 7 หมวด  ██
-# ══════════════════════════════════════════════════════════
-CATEGORIES = [
-    "อาหารพร้อมทานและเบเกอรี่",
-    "อาหารกึ่งสำเร็จรูปและของทานเล่น",
-    "เครื่องดื่ม",
-    "ผลิตภัณฑ์นมและอาหารแช่แข็ง",
-    "ของใช้ส่วนตัว (Personal Care)",
-    "ของใช้ในบ้านและเวชภัณฑ์เบื้องต้น",
-    "บริการและสินค้าเบ็ดเตล็ด",
-]
-CATEGORY_EMOJI = {
-    "อาหารพร้อมทานและเบเกอรี่":           "🍱",
-    "อาหารกึ่งสำเร็จรูปและของทานเล่น":    "🍜",
-    "เครื่องดื่ม":                          "🥤",
-    "ผลิตภัณฑ์นมและอาหารแช่แข็ง":         "🥛",
-    "ของใช้ส่วนตัว (Personal Care)":       "🧴",
-    "ของใช้ในบ้านและเวชภัณฑ์เบื้องต้น":   "🧹",
-    "บริการและสินค้าเบ็ดเตล็ด":            "🏪",
-}
-
-def classify_items_with_gemini(items: list) -> list:
-    """จัดประเภทสินค้า 7 หมวดด้วย Gemini (batch ทีเดียว)"""
-    import requests as _req
-    if not items: return items
-    key = _get_gemini_key()
-    if not key:
-        for it in items: it.setdefault("ประเภทสินค้า", "ไม่ระบุ")
-        return items
-    names = [it.get("ชื่อสินค้า", "") for it in items]
-    names_json = json.dumps(names, ensure_ascii=False)
-    cats_str = "\n".join(f"{i+1}. {c}" for i, c in enumerate(CATEGORIES))
-    prompt = f"""จงจัดประเภทสินค้าต่อไปนี้จากร้านสะดวกซื้อ CJ Express
-โดยแบ่งเป็น 7 ประเภทนี้เท่านั้น:
-{cats_str}
-
-รายการสินค้า ({len(names)} รายการ):
-{names_json}
-
-ตอบกลับเป็น JSON array ของ string เท่านั้น ห้ามมีข้อความอื่น ห้ามมี markdown backtick
-จำนวน element ต้องเท่ากับ {len(names)} รายการพอดี
-ตัวอย่าง: ["เครื่องดื่ม","อาหารพร้อมทานและเบเกอรี่"]"""
-    try:
-        resp = _req.post(f"{_GEMINI_API_URL}?key={key}",
-            json={"contents":[{"parts":[{"text":prompt}]}],
-                  "generationConfig":{"maxOutputTokens":800,"temperature":0.0}}, timeout=20)
-        resp.raise_for_status()
-        text_out = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        text_out = re.sub(r"```(?:json)?\s*|\s*```","",text_out).strip()
-        cats = json.loads(text_out)
-        if isinstance(cats, list) and len(cats) == len(items):
-            for it, cat in zip(items, cats):
-                it["ประเภทสินค้า"] = cat if cat in CATEGORIES else "บริการและสินค้าเบ็ดเตล็ด"
-            return items
-    except Exception: pass
-    for it in items: it.setdefault("ประเภทสินค้า","ไม่ระบุ")
-    return items
-
-def render_category_summary(items: list):
-    """แสดง metric + ตารางสรุปยอดแยกประเภท"""
-    if not items or not any("ประเภทสินค้า" in it for it in items): return
-    cat_totals: dict = {}; cat_counts: dict = {}
-    for it in items:
-        cat = it.get("ประเภทสินค้า","ไม่ระบุ")
-        cat_totals[cat] = round(cat_totals.get(cat,0)+float(it.get("ยอดรวมสินค้า",0)),2)
-        cat_counts[cat] = cat_counts.get(cat,0)+int(it.get("จำนวน",1))
-    if not cat_totals: return
-    st.markdown("**📊 สรุปยอดแยกตามประเภทสินค้า**")
-    sorted_cats = sorted(cat_totals.items(), key=lambda x: -x[1])
-    n_cols = min(len(sorted_cats),4); cols = st.columns(n_cols)
-    for i,(cat,total) in enumerate(sorted_cats):
-        with cols[i%n_cols]:
-            st.metric(label=f"{CATEGORY_EMOJI.get(cat,'📦')} {cat}",
-                      value=f"{total:.2f} ฿", delta=f"{cat_counts[cat]} ชิ้น", delta_color="off")
-    total_all = sum(cat_totals.values())
-    summary_rows = []
-    for cat in CATEGORIES+( ["ไม่ระบุ"] if "ไม่ระบุ" in cat_totals else []):
-        if cat in cat_totals:
-            summary_rows.append({
-                "ประเภท": f"{CATEGORY_EMOJI.get(cat,'📦')} {cat}",
-                "จำนวนชิ้น": cat_counts.get(cat,0),
-                "ยอดรวม (฿)": cat_totals.get(cat,0),
-                "% ของทั้งหมด": f"{cat_totals[cat]/total_all*100:.1f}%" if total_all else "0%",
-            })
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-# ══════════════════════════════════════════════════════════
-
 def _get_gemini_key() -> str:
-    try: return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-    except Exception: return os.environ.get("GEMINI_API_KEY", "")
+    """อ่าน Gemini API key จาก secrets หรือ env"""
+    try:
+        return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    except Exception:
+        return os.environ.get("GEMINI_API_KEY", "")
 
-def is_gemini_configured() -> bool: return bool(_get_gemini_key().strip())
+def is_gemini_configured() -> bool:
+    return bool(_get_gemini_key().strip())
 
 def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
+    """เรียก Gemini API และคืนค่า text response"""
     import requests as _req
     key = _get_gemini_key()
-    if not key: raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
-    resp = _req.post(f"{_GEMINI_API_URL}?key={key}",
-        json={"contents":[{"parts":[{"text":prompt}]}],
-              "generationConfig":{"maxOutputTokens":max_tokens,"temperature":0.1}}, timeout=30)
+    if not key:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    resp = _req.post(
+        f"{_GEMINI_API_URL}?key={key}",
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "maxOutputTokens": max_tokens,
+                "temperature": 0.1,   # ต้องการความแม่นยำ ไม่ต้องการ creative
+            },
+        },
+        timeout=30,
+    )
     resp.raise_for_status()
-    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+    data = resp.json()
+    return data["candidates"][0]["content"]["parts"][0]["text"]
+
 
 def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
+    """
+    ใช้ Gemini วิเคราะห์ raw text จากบิล CJ Express ครบทั้งใบ
+    ocr_source: "gdrive" หรือ "tesseract"/"vision"
+    - gdrive: ราคาแยกบรรทัด (ชื่อ → ราคาต่อหน่วย → ราคารวม V)
+    - tesseract/vision: ราคาอยู่บรรทัดเดียวกับชื่อสินค้า
+    """
     if ocr_source == "gdrive":
         format_hint = """รูปแบบข้อมูล (แต่ละสินค้ามี 3 บรรทัด):
 - บรรทัด 1: จำนวน ชื่อสินค้า  (เช่น "1 คาราบาวแดง" หรือ "- M&M ช็อกโกแลต")
@@ -686,7 +905,9 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 หมายเหตุ: "-" หน้าชื่อสินค้าหมายถึงจำนวน 1"""
     else:
         format_hint = """รูปแบบข้อมูล (แต่ละสินค้าอยู่บรรทัดเดียว):
-- รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม  (เช่น "1 คาราบาวแดง 12.00 12.00")"""
+- รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม  (เช่น "1 คาราบาวแดง 12.00 12.00")
+- หรือ: จำนวน ชื่อสินค้า ราคา  (เช่น "2 น้ำดื่ม 10.00 20.00")
+- OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด"""
 
     prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
 
@@ -699,53 +920,88 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "date": "วัน/เดือน/ปี",
   "time": "HH:MM",
   "branch": "ชื่อสาขา",
-  "pos_id": "รหัสสาขา 4-5 หลัก (ตัวเลขเท่านั้น)",
+  "pos_id": "รหัสสาขา 4-5 หลัก (ตัวเลขเท่านั้น ไม่ใช่ N02 หรือ POS code)",
   "rcpt_no": "เลขที่ใบเสร็จ",
   "total_amount": 0.0,
   "cash": 0.0,
   "change": 0.0,
   "items": [
-    {{"ชื่อสินค้า": "ชื่อสินค้า","จำนวน": 1,"ราคาต่อหน่วย": 0.0,"ยอดรวมสินค้า": 0.0}}
+    {{
+      "ชื่อสินค้า": "ชื่อสินค้า",
+      "จำนวน": 1,
+      "ราคาต่อหน่วย": 0.0,
+      "ยอดรวมสินค้า": 0.0
+    }}
   ]
 }}
 
 กฎสำคัญ:
 - items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม
-- pos_id: ต้องเป็นตัวเลข 4-5 หลักของสาขา
+- pos_id: ต้องเป็นตัวเลข 4-5 หลักของสาขา (เช่น 2144) ไม่ใช่รหัส POS เครื่อง (เช่น N02)
 - total_amount: ยอดรวมหลังหักส่วนลด
+- cash: เงินที่จ่าย (เงินสด/QR)
+- change: เงินทอน
 - ถ้าหาข้อมูลไม่เจอให้ใส่ "" หรือ 0.0"""
 
     try:
         text_out = _call_gemini(prompt)
         text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
         data = json.loads(text_out)
-        bill = {"date":str(data.get("date","ไม่พบ")),"time":str(data.get("time","ไม่พบ")),
-                "branch":str(data.get("branch","ไม่พบ")),"pos_id":str(data.get("pos_id","ไม่พบ")),
-                "rcpt_no":str(data.get("rcpt_no","ไม่พบ")),"total_amount":float(data.get("total_amount",0)),
-                "cash":0.0,"change":0.0,"tax_id":"ไม่พบ","user":"ไม่พบ","name":"ไม่พบ"}
+
+        bill = {
+            "date":         str(data.get("date", "ไม่พบ")),
+            "time":         str(data.get("time", "ไม่พบ")),
+            "branch":       str(data.get("branch", "ไม่พบ")),
+            "pos_id":       str(data.get("pos_id", "ไม่พบ")),
+            "rcpt_no":      str(data.get("rcpt_no", "ไม่พบ")),
+            "total_amount": float(data.get("total_amount", 0)),
+            "cash":         0.0,
+            "change":       0.0,
+            "tax_id":       "ไม่พบ",
+            "user":         "ไม่พบ",
+            "name":         "ไม่พบ",
+        }
+
         items = []
         for it in data.get("items", []):
-            items.append({"ชื่อสินค้า":str(it.get("ชื่อสินค้า","")),"จำนวน":int(it.get("จำนวน",1)),
-                          "ราคาต่อหน่วย":float(it.get("ราคาต่อหน่วย",0)),
-                          "ยอดรวมสินค้า":float(it.get("ยอดรวมสินค้า",0))})
-        return {"bill":bill,"items":items,"ok":True}
+            items.append({
+                "ชื่อสินค้า":    str(it.get("ชื่อสินค้า", "")),
+                "จำนวน":        int(it.get("จำนวน", 1)),
+                "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
+            })
+
+        return {"bill": bill, "items": items, "ok": True}
+
     except Exception as e:
-        return {"bill":None,"items":[],"ok":False,"error":str(e)}
+        return {"bill": None, "items": [], "ok": False, "error": str(e)}
+
 
 def extract_items_with_gemini(raw_text: str) -> list:
+    """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
     result = extract_with_gemini(raw_text)
     return result.get("items", [])
 
-def _collapse(text: str) -> str: return re.sub(r'\s+', '', text)
-def _th_spaced(word: str) -> str: return r'\s*'.join(re.escape(c) for c in word)
+
+def _collapse(text: str) -> str:
+    return re.sub(r'\s+', '', text)
+
+def _th_spaced(word: str) -> str:
+    return r'\s*'.join(re.escape(c) for c in word)
 
 _KW_CANONICAL = {
     "ยอดรวม": ["ยอดรวม","ยอตรวม","ยอดราม","บอดรวม","มอดราม","นลดราม","นอดรวม",
-               "รวมสุทธิ","รวมทั้งสิ้น","Total","NET TOTAL","net total","UORTIN","UORT"],
-    "เงินสด": ["เงินสด","เง็นสด","เม็นสด","CASH","QR","QR5"],
-    "เงินทอน": ["เงินทอน","เง็นทอน","เงินทอม","Change","CHANGE"],
-    "สาขา": ["มอร์สาขา","CJมอร์","สาขา","ซีเจมอร์"],
+               "นลดร5าม","นลดร6าม","นลดรSาม","ยถอดรวม","ยถอดราม","มบลดาม","บลดราม",
+               "รวมสุทธิ","รวมทั้งสิ้น","Total","NET TOTAL","net total",
+               "UORTIN","UORT"],
+    "เงินสด": ["เงินสด","เง็นสด","เม็นสด","เแงินสด","CASH","QR","QR5","QRcode",
+               "ฝัน","เงินสะด","เฉินสด","ฝันเค","ในสต","เงินเด"],
+    "เงินทอน": ["เงินทอน","เง็นทอน","เงินทอม","เงินหอน","เงินหอแ",
+                "Change","CHANGE","เงินทอร","เง็นทอร","เงน11าน","เงินบน"],
+    "สาขา": ["มอร์สาขา","CJมอร์","CJมอร์สาขา","สาขา","สาขาที่","มอร์สาขาที่",
+             "มอร์ลาขา","ซีเจมอร์"],
 }
+
 def _build_kw_re(key: str) -> re.Pattern:
     variants = _KW_CANONICAL.get(key, [key])
     return re.compile('|'.join(_th_spaced(v) for v in variants), re.IGNORECASE)
@@ -759,10 +1015,13 @@ _RE_DATE   = re.compile(r'(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})')
 _RE_TIME   = re.compile(r'\b([01]\d|2[0-3])[:.:]([0-5]\d)\b')
 _RE_TAX_ID = re.compile(r'TAX\s*(?:ID|1D|10|lD|id)?\s*[:\s]?\s*(\d{10,13})', re.IGNORECASE)
 
+
 def parse_price(s: str) -> float:
     if not s: return 0.0
-    s = str(s).strip().replace('O','0').replace('o','0').replace('l','1').replace('I','1')
-    s = re.sub(r'^(\d+)\s+(\d{2})$', r'\1.\2', s.strip()).replace(',', '.')
+    s = str(s).strip()
+    s = s.replace('O','0').replace('o','0').replace('l','1').replace('I','1')
+    s = re.sub(r'^(\d+)\s+(\d{2})$', r'\1.\2', s.strip())
+    s = s.replace(',', '.')
     cleaned = re.sub(r'[^\d.]', '', s)
     if not cleaned: return 0.0
     parts = cleaned.split('.')
@@ -772,6 +1031,7 @@ def parse_price(s: str) -> float:
     try: return float(cleaned)
     except: return 0.0
 
+
 def _find_prices_in_line(line: str) -> list:
     prices = []
     for m in re.finditer(r'\b(\d{1,6}[.,]\d{2})\b', line):
@@ -780,11 +1040,23 @@ def _find_prices_in_line(line: str) -> list:
     for m in re.finditer(r'\b(\d{1,5})\s+(\d{2})\b', line):
         prices.append(parse_price(f"{m.group(1)}.{m.group(2)}"))
     if prices: return prices
+    _merged_zero = re.sub(r'(\d)\s*[ก-๙a-zA-Z]\s*(\d)', r'\g<1>0\g<2>', line)
+    if _merged_zero != line:
+        _mc = _collapse(_merged_zero)
+        for m in re.finditer(r'(?<!\d)(\d{3,6})(?!\d)', _mc):
+            n = m.group(1)
+            if n.endswith('00'): prices.append(parse_price(n))
+        if prices: return prices
     c = _collapse(line)
+    for m in re.finditer(r'\b(\d{3,6})\b', c):
+        n = m.group(1)
+        if n.endswith('00'): prices.append(parse_price(n))
+    if prices: return prices
     for m in re.finditer(r'(?<!\d)(\d{3,6})(?!\d)', c):
         n = m.group(1)
         if n.endswith('00'): prices.append(parse_price(n))
     return prices
+
 
 def _fix_date(d: str) -> str:
     parts = re.split(r'[-/.]', d)
@@ -798,23 +1070,27 @@ def _fix_date(d: str) -> str:
             candidate = '202' + yr[3]
             if candidate.isdigit() and 2020 <= int(candidate) <= 2035:
                 yr = candidate
-    elif len(yr) == 2: yr = '20' + yr
+    elif len(yr) == 2:
+        yr = '20' + yr
     if mon == '00': mon = '01'
     if day == '00': day = '01'
     sep = re.search(r'[-/.]', d).group(0)
     return f"{day}{sep}{mon}{sep}{yr}"
+
 
 def _clean_bno(raw: str) -> str:
     raw = re.sub(r'(?<=[A-Za-z0-9]):(?=\d)', '-', raw)
     result = []
     for i, c in enumerate(raw):
         if c in ('$','€','£'):
-            prev = raw[i-1] if i > 0 else ''; nxt = raw[i+1] if i < len(raw)-1 else ''
+            prev = raw[i-1] if i > 0 else ''
+            nxt  = raw[i+1] if i < len(raw)-1 else ''
             result.append('5' if (prev.isdigit() and nxt.isdigit()) else 'S')
         elif c == '\u00a7': result.append('S')
-        elif c in ("'","\u2018","\u2019","`"): result.append('')
+        elif c in ("'", "\u2018", "\u2019", "`"): result.append('')
         else: result.append(c)
     return re.sub(r'S{2,}', 'S', ''.join(result))
+
 
 def _find_rcpt_no(text: str, compact: str) -> str:
     for line in text.split('\n'):
@@ -822,41 +1098,100 @@ def _find_rcpt_no(text: str, compact: str) -> str:
         m = re.search(r"(?:BNO|8NO|BN0)[:'\u2018\u2019`\-\.\s]*(.+)$", c, re.IGNORECASE)
         if m:
             raw_tail = m.group(1).strip()
-            if raw_tail: return _clean_bno(raw_tail) or raw_tail
+            if raw_tail:
+                cleaned = _clean_bno(raw_tail)
+                return cleaned if cleaned else raw_tail
     m = re.search(r'([A-Z]\d{7,}[A-Z]\d{2}-\d{4,})', compact)
     if m: return m.group(1)
-    m = re.search(r'(?:Rcpt|RCPT)[^\d]{0,6}(\d{6,})', compact, re.IGNORECASE)
+    for src in [text, compact]:
+        m = re.search(
+            r'(?:1D|ID|lD)\s*[:\s€£$]\s*([A-Za-z][A-Za-z0-9]{5,24})',
+            src, re.IGNORECASE)
+        if m:
+            raw = m.group(1).replace('€','E').replace('£','E').replace('$','5').replace('O','0')
+            cut = re.match(r'([A-Z][A-Z0-9]{5,23})', raw)
+            if cut: return cut.group(1)
+    m = re.search(r'(?:Rcpt|RCPT|Rcopth)[^\d]{0,6}(\d{6,})', compact, re.IGNORECASE)
     if m: return m.group(1)
+    for line in text.split('\n'):
+        c = _collapse(line)
+        m = re.search(r'(\d{8})[^0-9]{0,4}(\d{2})[^0-9]{0,4}(\d{6})', c)
+        if m:
+            return f"S{m.group(1)}N{m.group(2)}-{m.group(3)}"
+    for line in text.split('\n'):
+        c = _collapse(line)
+        if not re.search(r'B[NL]O|8NO|BN0', c, re.IGNORECASE): continue
+        all_digits = ''.join(re.findall(r'\d', c))
+        n = len(all_digits)
+        if n >= 16:
+            dd = all_digits[:16]
+            return f"S{dd[:8]}N{dd[8:10]}-{dd[10:16]}"
+        elif n >= 10:
+            return f"S{all_digits[:8]}N{all_digits[8:10]}-{all_digits[10:]}"
+    for line in text.split('\n'):
+        if _RE_DATE.search(line):
+            nums = re.findall(r'\d{6,}', _collapse(line))
+            if nums: return max(nums, key=len)
     return "ไม่พบ"
 
+
 def _find_pos_id(text: str, compact: str, lines: list) -> str:
-    _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา)'
+    _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
+    # 1. หาจาก keyword สาขา + ตัวเลข 4-5 หลัก
     for line in lines[:12]:
         c = _collapse(line)
         m = re.search(_BRANCH_KW + r'[^\d]{0,4}(\d{4,5})', c, re.IGNORECASE)
-        if m: return m.group(1).lstrip('0') or m.group(1)
+        if m:
+            val = m.group(1).lstrip('0') or m.group(1)
+            return val
+    # 2. หาจากบรรทัดที่มีชื่อร้าน (มอร์ / เจเอ / CJ / MORE)
     for line in lines[:12]:
         c = _collapse(line)
-        if re.search(r'มอร์|CJ|MORE', line, re.IGNORECASE):
+        if re.search(r'มอร์|มอร|เจเอ|CJ|MORE', line, re.IGNORECASE) or 'มอร์' in c:
             nums = re.findall(r'0?\d{4,5}(?!\d)', c)
-            if nums: return nums[0].lstrip('0') or nums[0]
+            if nums:
+                val = nums[0].lstrip('0') or nums[0]
+                return val
+    # 3. หาจาก compact ทั้งหมด
     m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{4,5})', compact, re.IGNORECASE)
-    if m: return m.group(1).lstrip('0') or m.group(1)
+    if m:
+        return m.group(1).lstrip('0') or m.group(1)
+    # 4. เลข 4-5 หลักทั่วไป (รองรับ 0 นำหน้าจาก OCR)
     nums_all = re.findall(r'(?<!\d)0?\d{4,5}(?!\d)', compact)
-    if nums_all: return nums_all[0].lstrip('0') or nums_all[0]
+    if nums_all:
+        return nums_all[0].lstrip('0') or nums_all[0]
+    # 5. POS fallback — priority ต่ำสุด ไม่จับ N02 ขึ้นมาแทนสาขา
+    for line in lines[:10]:
+        c = _collapse(line)
+        m = re.search(r'POS\s*[.\s]*NO\s*S?\s*(\d{1,2})\b', c, re.IGNORECASE)
+        if m: return f"NO{m.group(1)}"
+        m = re.search(r'POS\s*(?:ID|:)?\s*#?\s*([A-Za-z]\d{1,3})(?!\d)', c, re.IGNORECASE)
+        if m: return m.group(1)
+    m = re.search(r'\((\d{4,})\)', compact)
+    if m: return m.group(1)
     return "ไม่พบ"
+
 
 def _find_branch(text: str, compact: str, lines: list) -> str:
     cj_pattern = r'(?:ซีเจ|CJ)?ม[อ][ร][ลซ]์?.*?สาขา(?:ที่|เลขที่)?\s*?(\d{2,}(?:\s*\d+)*)'
+    bigc_pattern = r'(Big\s*C\s*(?:Mini|Extra)?|BCM|BCH)'
     for line in lines[:12]:
         c = _collapse(line)
         m_cj = re.search(cj_pattern, c, re.IGNORECASE)
-        if m_cj: return f"สาขา {m_cj.group(1).replace(' ','')}"
-    m = re.search(r'(?:มอร์|สาขา)\s*?(\d{2,}(?:\s*\d+)*)', compact, re.IGNORECASE)
-    if m: return f"สาขา {m.group(1).replace(' ','')}"
+        if m_cj:
+            raw_num = m_cj.group(1).replace(" ", "")
+            return f"สาขา {raw_num}"
+        m_bigc = re.search(bigc_pattern, c, re.IGNORECASE)
+        if m_bigc:
+            return line.strip()
+    m_compact = re.search(r'(?:มอร์|สาขา)\s*?(\d{2,}(?:\s*\d+)*)', compact, re.IGNORECASE)
+    if m_compact:
+        return f"สาขา {m_compact.group(1).replace(' ', '')}"
     return "ไม่พบ"
 
+
 _RE_POINTS_LINE = re.compile(r'แต\s*้?\s*ม', re.IGNORECASE)
+
 
 def _find_amount(text_lines: list, kw_re: re.Pattern, allow_zero: bool = True) -> float:
     for line in text_lines:
@@ -870,35 +1205,51 @@ def _find_amount(text_lines: list, kw_re: re.Pattern, allow_zero: bool = True) -
             if val > 0 or allow_zero: return val
     return 0.0
 
+
 def _find_amounts_positional(lines: list) -> list:
     end_idx = 0
     for idx, line in enumerate(lines):
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line):
-            end_idx = idx + 1; break
+            end_idx = idx + 1
+            break
     found = []
     for line in lines[end_idx:]:
         prices = _find_prices_in_line(line) or _find_prices_in_line(_collapse(line))
-        if prices: found.append(parse_price(prices[-1]))
-        if len(found) >= 3: break
+        if prices:
+            found.append(parse_price(prices[-1]))
+        if len(found) >= 3:
+            break
     return found
+
 
 def _find_tax_id(compact: str) -> str:
     m = _RE_TAX_ID.search(compact)
     return m.group(1) if m else "ไม่พบ"
 
+
 def clean_text(text: str) -> str:
     if not text: return ""
     lines = [re.sub(r'[ \t]+', ' ', ln).strip() for ln in text.split('\n')]
     _SPACED = [
-        (r'ย\s*อ\s*[ดต]\s*ร\s*ว\s*ม', 'ยอดรวม'),
-        (r'น\s*ล\s*ด\s*ร\s*[า5]\s*ม', 'ยอดรวม'),
-        (r'เ\s*ง\s*ิ?\s*น\s*ส\s*ด', 'เงินสด'),
-        (r'เ\s*ง\s*ิ?\s*น\s*ท\s*อ\s*น', 'เงินทอน'),
-        (r'บ\s*า\s*ท', 'บาท'),
-        (r'T\s*o\s*t\s*a\s*[l1i]', 'Total'),
-        (r'C\s*A\s*S\s*H', 'CASH'),
-        (r'C\s*h\s*a\s*n\s*g\s*e', 'Change'),
-        (r'T\s*A\s*X\s*[I1l]\s*D', 'TAXID'),
+        (r'ย\s*อ\s*[ดต]\s*ร\s*ว\s*ม',          'ยอดรวม'),
+        (r'น\s*ล\s*ด\s*ร\s*[า5]\s*ม',           'ยอดรวม'),
+        (r'บ\s*อ\s*ด\s*ร\s*ว\s*ม',              'ยอดรวม'),
+        (r'ม\s*อ\s*ด\s*ร\s*า\s*ม',              'ยอดรวม'),
+        (r'เ\s*ง\s*ิ?\s*น\s*ส\s*ด',             'เงินสด'),
+        (r'เ\s*ง\s*ิ?\s*น\s*ท\s*อ\s*น',         'เงินทอน'),
+        (r'เ\s*ง\s*ิ?\s*น\s*ห\s*อ\s*[นแ]',      'เงินทอน'),
+        (r'เ\s*ง\s*[ิี]\s*น\s*[7]\s*[ไ]',        'เงินทอน'),
+        (r'บ\s*า\s*ท',                            'บาท'),
+        (r'ม\s*อ\s*ร\s*์\s*[สลซ]\s*า\s*ข\s*า',  'มอร์สาขา'),
+        (r'ส\s*า\s*ข\s*า\s*[หท]\s*[ิี]\s*[่]?',  'สาขาที่'),
+        (r'ใ\s*บ\s*เ\s*[สล]\s*ร\s*[็]\s*จ',      'ใบเสร็จ'),
+        (r'T\s*o\s*t\s*a\s*[l1i]',               'Total'),
+        (r'C\s*A\s*S\s*H',                        'CASH'),
+        (r'C\s*h\s*a\s*n\s*g\s*e',               'Change'),
+        (r'V\s*A\s*[TI]',                         'VAT'),
+        (r'R\s*E\s*C\s*E\s*I\s*P\s*T',           'RECEIPT'),
+        (r'I\s*N\s*C\s*L\s*U\s*D\s*E\s*D',       'INCLUDED'),
+        (r'T\s*A\s*X\s*[I1l]\s*D',               'TAXID'),
     ]
     out = []
     for line in lines:
@@ -907,13 +1258,20 @@ def clean_text(text: str) -> str:
         out.append(line)
     text2 = '\n'.join(out)
     _FIXES = {
-        "Tota)":"Total","Tota1":"Total","ยอดราม":"ยอดรวม","ยอตรวม":"ยอดรวม",
-        "รวมสุทธิ":"ยอดรวม","เง็นสด":"เงินสด","เม็นสด":"เงินสด",
-        "เงินทอม":"เงินทอน","เง็นทอน":"เงินทอน","1D:":"ID:","lD:":"ID:",
-        "RECEIPI":"RECEIPT","uw":"บาท","inn":"บาท",
+        "Tota)":"Total","Tota1":"Total","Toial":"Total","Totai":"Total",
+        "ยอดราม":"ยอดรวม","ยอตรวม":"ยอดรวม","รวมสุทธิ":"ยอดรวม","Net Total":"ยอดรวม",
+        "เง็นสด":"เงินสด","เม็นสด":"เงินสด","เแงินสด":"เงินสด",
+        "Quan":"เงินสด","QUA N":"เงินสด","ฝัน ต":"เงินสด","ฝันต":"เงินสด",
+        "เงินทอม":"เงินทอน","เง็นทอน":"เงินทอน",
+        "1D:":"ID:","lD:":"ID:","ID:£":"ID:E","ID:$":"ID:S","ID:€":"ID:E",
+        "1D:€":"ID:E","lD:€":"ID:E",
+        "RECEIPI":"RECEIPT",
+        "uw":"บาท","inn":"บาท","inv":"บาท","บนาท":"บาท","น บ นา ท":"บาท",
     }
-    for old, new in _FIXES.items(): text2 = text2.replace(old, new)
-    def fix_date_m(m): return _fix_date(m.group(0))
+    for old, new in _FIXES.items():
+        text2 = text2.replace(old, new)
+    def fix_date_m(m):
+        return _fix_date(m.group(0))
     text2 = _RE_DATE.sub(fix_date_m, text2)
     amt_kw = ["Total","CASH","Change","VAT","เงินทอน","เงินสด","ยอดรวม","บาท","QR"]
     final = []
@@ -922,18 +1280,27 @@ def clean_text(text: str) -> str:
         if any(k.lower() in low for k in amt_kw):
             line = re.sub(r'\b(\d{1,5})\s*[:]\s*(\d{2})\b', r'\1.\2', line)
             line = re.sub(r'\b(\d{1,5})\s+(\d{2})\b(?!\s*\d)', r'\1.\2', line)
+            line = re.sub(r'(?<!\d\.)\b(\d{3,6})\b(?!\.\d)',
+                lambda m: (m.group(0)[:-2]+'.'+m.group(0)[-2:]
+                           if m.group(0).endswith('00') and len(m.group(0))>=3
+                           else m.group(0)), line)
             line = re.sub(r'(\d+),(\d{2})\b', r'\1.\2', line)
         final.append(line)
     return '\n'.join(final)
 
+
 def extract_receipt(text: str) -> dict:
-    lines = text.split('\n'); compact = _collapse(text)
+    lines   = text.split('\n')
+    compact = _collapse(text)
     date_m = _RE_DATE.search(text)
     date_str = _fix_date(date_m.group(1)) if date_m else "ไม่พบ"
     time_val = "ไม่พบ"
     for line in lines:
         m = _RE_TIME.search(line)
-        if m: time_val = f"{m.group(1)}:{m.group(2)}"; break
+        if m:
+            h, mn = m.group(1), m.group(2)
+            time_val = f"{h}:{mn}"
+            break
     if time_val == "ไม่พบ":
         for line in lines:
             if _RE_DATE.search(line):
@@ -942,29 +1309,47 @@ def extract_receipt(text: str) -> dict:
                 if m:
                     h, mn = m.group(1), m.group(2)
                     if 0 <= int(h) <= 23 and 0 <= int(mn) <= 59:
-                        time_val = f"{h}:{mn}"; break
+                        time_val = f"{h}:{mn}"
+                        break
+                m2 = re.search(r'\b([01]\d|2[0-3])([0-5]\d)\b', after)
+                if m2: time_val = f"{m2.group(1)}:{m2.group(2)}"; break
     branch  = _find_branch(text, compact, lines)
     pos_id  = _find_pos_id(text, compact, lines)
     rcpt_no = _find_rcpt_no(text, compact)
     tax_id  = _find_tax_id(compact)
     user_m = re.search(r'User\s*#?\s*(\w+)', compact, re.IGNORECASE)
-    user = user_m.group(1) if user_m else "ไม่พบ"
+    user   = user_m.group(1) if user_m else "ไม่พบ"
     total  = _find_amount(lines, _RE_TOTAL)
     cash   = _find_amount(lines, _RE_CASH)
     change = _find_amount(lines, _RE_CHANGE)
     if total == 0.0:
-        _skip_total = re.compile(r'จำนวนสินค้า|จำนวนรายการ|จานวน', re.IGNORECASE)
+        _skip_total = re.compile(r'จำนวนสินค้า|จำนวนรายการ|จานวน|ร า ย ก า ร|รายการ', re.IGNORECASE)
         for line in lines:
             c = _collapse(line)
-            if re.search(r'ยอดรวม|นลดราม|มอดราม', c, re.IGNORECASE) and not _skip_total.search(c):
+            is_total_line = (re.search(r'ยอดรวม|นลดราม|มอดราม', c, re.IGNORECASE) and
+                             not _skip_total.search(c))
+            if is_total_line:
                 prices = _find_prices_in_line(line) or _find_prices_in_line(c)
                 if prices: total = prices[-1]; break
+    if change == 0.0:
+        for line in lines:
+            c = _collapse(line)
+            if re.search(r'เงิน.{0,4}[าท][าน]', c, re.IGNORECASE):
+                prices = _find_prices_in_line(line) or _find_prices_in_line(c)
+                if prices and prices[-1] > 0: change = prices[-1]; break
+            if re.search(r'เง\s*ิ\s*น\s*[1ไ7]\s*[าท]', line, re.IGNORECASE):
+                prices = _find_prices_in_line(line)
+                if prices and prices[-1] > 0: change = prices[-1]; break
+            if re.match(r'เง[นม]\s*[1lI]{1,2}\s*[าห][นม]', c, re.IGNORECASE):
+                prices = _find_prices_in_line(line) or _find_prices_in_line(c)
+                if prices and prices[-1] > 0: change = prices[-1]; break
     if total == 0.0:
         positional = _find_amounts_positional(lines)
         if len(positional) >= 1: total  = positional[0]
         if len(positional) >= 2: cash   = positional[1]
         if len(positional) >= 3: change = positional[2]
     skip_name_kw = ["Total","CASH","Change","Vat","Rcpt","POS","TAX","User",
+                    "INCLUDED","RECEIPT","INVOICE","ขอบคุณ",
                     "ยอดรวม","เงินสด","เงินทอน","สาขา","บาท","ID:","BNO"]
     name = "ไม่พบ"
     for line in lines:
@@ -973,9 +1358,12 @@ def extract_receipt(text: str) -> dict:
         if m:
             candidate = re.sub(r'^\d+\s*[xXP]?\s*', '', line[:m.start()]).strip()
             if len(candidate) >= 2: name = candidate; break
-    return {"date":date_str,"time":time_val,"branch":branch,"name":name,
-            "total_amount":total,"cash":0.0,"change":0.0,
-            "pos_id":pos_id,"rcpt_no":rcpt_no,"tax_id":tax_id,"user":user}
+    return {
+        "date": date_str, "time": time_val, "branch": branch, "name": name,
+        "total_amount": total, "cash": 0.0, "change": 0.0,
+        "pos_id": pos_id, "rcpt_no": rcpt_no, "tax_id": tax_id, "user": user,
+    }
+
 
 def _fix_spaced_price_core(s: str) -> str:
     def _dot4(m):
@@ -983,12 +1371,17 @@ def _fix_spaced_price_core(s: str) -> str:
         return (n[:-2]+'.'+n[-2:]) if n.endswith('00') else n
     s = re.sub(r'(?<!\d)\d{3,4}(?!\d)', _dot4, s)
     s = re.sub(r'(?<![.\d])(\d+)\s+(\d{2})(?=\s|$)', r'\1.\2', s)
+    s = re.sub(r'(?<![.\d])(\d+)\s+(\d)(?=\s|$)', r'\1.\g<2>0', s)
     return s
+
 
 def _fix_spaced_price(s: str) -> str:
     m = re.match(r'^((?:\d+\s+){1,2})(?=\D)(.*)$', s)
-    if m: qty_prefix, rest = m.groups(); return qty_prefix + _fix_spaced_price_core(rest)
+    if m:
+        qty_prefix, rest = m.groups()
+        return qty_prefix + _fix_spaced_price_core(rest)
     return _fix_spaced_price_core(s)
+
 
 def _clean_item_name(nm: str) -> str:
     nm = re.sub(r'\s+', ' ', nm).strip()
@@ -996,123 +1389,235 @@ def _clean_item_name(nm: str) -> str:
     nm = re.sub(r'\s*[!"\'|！,\-]+$', '', nm)
     return nm.strip()
 
+
 def _merge_gdrive_lines(lines: list) -> list:
+    """
+    Google Drive OCR มี 2 รูปแบบหลัก:
+
+    รูปแบบ A (สลับกัน — บิลส่วนใหญ่):
+        1 คาราบาว 18
+        15.00
+        15.00 V
+    → "1 คาราบาว 18 15.00 15.00"
+
+    รูปแบบ B (แยก block — บิลที่มีสินค้าหลายตัว):
+        ชื่อ1          ← ชื่อสินค้าทุกตัวมาก่อน
+        ชื่อ2
+        ...
+        10.00          ← ราคาทุกตัวตามมา
+        10.00 V
+        45.00
+        45.00 V
+        ...
+    → จับคู่ชื่อ+ราคาตามลำดับ
+    """
     _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
+    # รองรับทั้ง "1 ชื่อ" และ "- ชื่อ" (dash แทน qty)
     _item_start = re.compile(r'^(?:\d+|-)\s*\S')
-    _kw_amount  = re.compile(r'ยอดรวม|ยอดราม|เงินสด|เงินทอน|รวมทั้งสิ้น|บอดราม', re.IGNORECASE)
+    _kw_amount  = re.compile(
+        r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
+        re.IGNORECASE)
+
+    # pass 1: กรอง V เดี่ยวๆ ออก
     lines = [l for l in lines if not _v_only.match(l.strip())]
+
+    # ── ตรวจว่าเป็น block format ไหม ──
     def _find_price_block(lines):
-        consec = 0; block_start = None
+        """
+        คืน price_start_idx ถ้าพบ block ราคาต่อเนื่อง >= 6 บรรทัด
+        และก่อนหน้านั้นมีชื่อสินค้า >= 3 ตัวที่ไม่มีราคาตามหลัง
+        (format B คือชื่อทุกตัวมาก่อน แล้วราคาทุกตัวตามหลัง)
+        format A จะมีราคาสลับกับชื่อ ไม่ใช่ block ยาว
+        """
+        consec = 0
+        block_start = None
         for i, line in enumerate(lines):
             s = line.strip()
             if _price_only.match(s) and s:
-                if consec == 0: block_start = i
+                if consec == 0:
+                    block_start = i
                 consec += 1
+                # ต้องมีราคาต่อเนื่อง >= 6 บรรทัด (3 สินค้า × 2 บรรทัด/สินค้า)
                 if consec >= 6:
-                    name_only_count = sum(1 for l in lines[:block_start]
-                        if _item_start.match(l.strip()) and _has_thai.search(l)
-                        and not _RE_PRICE.search(l))
-                    if name_only_count >= 3: return block_start
-            else: consec = 0; block_start = None
+                    # ตรวจว่าก่อน block มีชื่อสินค้า (item_start) >= 3 ตัว
+                    # ที่ไม่มีราคาในบรรทัดเดียวกัน
+                    name_only_count = sum(
+                        1 for l in lines[:block_start]
+                        if _item_start.match(l.strip())
+                        and _has_thai.search(l)
+                        and not _RE_PRICE.search(l)
+                    )
+                    if name_only_count >= 3:
+                        return block_start
+            else:
+                consec = 0
+                block_start = None
         return None
+
+    # ── รวม keyword กับราคาบรรทัดถัดไปเสมอ (ทำก่อนทุก pass) ──
     def _merge_kw_price(lines):
-        out = []; i = 0
+        out = []
+        i = 0
         while i < len(lines):
             line = lines[i].strip()
             if _kw_amount.search(line) and not _RE_PRICE.search(line):
                 j = i + 1
                 if j < len(lines):
                     nx = lines[j].strip()
-                    if _RE_PRICE.search(nx): out.append(line + " " + nx); i = j + 1; continue
-            out.append(line); i += 1
+                    if _RE_PRICE.search(nx):
+                        out.append(line + " " + nx)
+                        i = j + 1
+                        continue
+            out.append(line)
+            i += 1
         return out
+
     lines = _merge_kw_price(lines)
+
+    # ── แปลง HH:MM ที่จริงๆ คือราคา เช่น 10:00 → 10.00 ──
     lines = [re.sub(r'\b(\d{1,2}):(\d{2})\b', lambda m: f"{m.group(1)}.{m.group(2)}", l) for l in lines]
+
     price_block_start = _find_price_block(lines)
+
     if price_block_start and price_block_start > 3:
-        name_lines = lines[:price_block_start]; price_lines = lines[price_block_start:]
+        # ── รูปแบบ B: แยก block ──
+        name_lines  = lines[:price_block_start]
+        price_lines = lines[price_block_start:]
+
         item_names = [l.strip() for l in name_lines
                       if l.strip() and not _price_only.match(l.strip())
                       and not _kw_amount.search(l.strip())
                       and (_item_start.match(l.strip()) or _has_thai.search(l.strip()))
                       and not re.search(r'BNO|TAX|VAT|POS|User|ID:', l, re.IGNORECASE)
                       and not re.match(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}', l.strip())]
+
+        # เก็บเฉพาะราคาจริง (ไม่ใช่ V) และ deduplicate ราคาซ้ำ
         raw_prices = []
         for l in price_lines:
             l = l.strip()
             if not l: continue
-            if _kw_amount.search(l): break
+            if _kw_amount.search(l): break   # หยุดเมื่อเจอ keyword สรุป
             clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
             if _price_only.match(l) and clean:
-                if not raw_prices or raw_prices[-1] != clean: raw_prices.append(clean)
+                # เก็บราคาแรกของแต่ละคู่ (ข้ามราคาซ้ำ)
+                if not raw_prices or raw_prices[-1] != clean:
+                    raw_prices.append(clean)
+
+        # จับคู่ชื่อ+ราคา
         merged = []
         for i, name in enumerate(item_names):
-            if i < len(raw_prices): merged.append(f"{name} {raw_prices[i]}")
-            else: merged.append(name)
-        after_block = []; found_kw = False
+            if i < len(raw_prices):
+                merged.append(f"{name} {raw_prices[i]}")
+            else:
+                merged.append(name)
+
+        # เพิ่มบรรทัดที่เหลือหลัง block ราคา (ยอดรวม เงินสด ฯลฯ)
+        after_block = []
+        found_kw = False
         for l in price_lines:
-            if _kw_amount.search(l.strip()): found_kw = True
-            if found_kw: after_block.append(l)
+            if _kw_amount.search(l.strip()):
+                found_kw = True
+            if found_kw:
+                after_block.append(l)
         merged += after_block
-        header = [l for l in name_lines if l.strip() and l.strip() not in [n for n in item_names]]
+
+        # เพิ่ม header lines (ก่อน item_names)
+        header = [l for l in name_lines
+                  if l.strip() and l.strip() not in [n for n in item_names]]
         return header + merged
+
     else:
-        merged = []; i = 0
+       # ── รูปแบบ A: สลับกัน (เดิม) ──
+        merged = []
+        i = 0
         while i < len(lines):
             line = lines[i].strip()
-            if not line: merged.append(line); i += 1; continue
+            if not line:
+                merged.append(line)
+                i += 1
+                continue
             if _item_start.match(line) and _has_thai.search(line):
-                combined = line; j = i + 1; price_count = 0
+                combined = line
+                j = i + 1
+                price_count = 0
                 while j < len(lines) and price_count < 2:
                     nx = lines[j].strip()
                     if not nx: break
                     if _price_only.match(nx):
                         part = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
                         if part: combined += " " + part
-                        price_count += 1; j += 1
+                        price_count += 1
+                        j += 1
                     elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
-                        combined += " " + nx; j += 1
-                    else: break
-                if price_count > 0: merged.append(combined); i = j; continue
-            merged.append(line); i += 1
+                        # ชื่อสินค้าแยก 2 บรรทัด เช่น "1 เจล" + "ปม โคล1269" → รวมเป็นชื่อเดียว
+                        combined += " " + nx
+                        j += 1
+                    else:
+                        break
+                if price_count > 0:
+                    merged.append(combined)
+                    i = j
+                    continue
+            merged.append(line)
+            i += 1
         return merged
 
+
 def extract_items_cj(text: str) -> list:
-    items = []; lines = text.split('\n')
+    items  = []
+    lines  = text.split('\n')
+
+    # รวมบรรทัดที่ Google Drive OCR แยกราคาออกเป็นบรรทัดใหม่
     lines = _merge_gdrive_lines(lines)
+
     start_idx = 0
     _DATE_RE2 = re.compile(r'\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}')
     for idx, line in enumerate(lines):
         if _DATE_RE2.search(line) or _DATE_RE2.search(_collapse(line)):
             start_idx = idx + 1; break
-    stop_kw = ["ยอดรวม","ยอดราเม","ยอดราม","บอดราม","UORTIN","UORT","รวมทั้งสิ้น",
-               "เงินสด","เงินเด","ในสต","เงินทอน","เงินบน",
-               "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า"]
+
+    stop_kw = ["ยอดรวม","ยอดราเม","ยอดราม","บอดราม","UORTIN","UORT",
+               "รวมทั้งสิ้น",
+               "เงินสด","เงินเด","ในสต",
+               "เงินทอน","เงินบน",
+               "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า",
+               "จํานวนสินค้ารวม","จำนวนสินค้ารวม"]
     skip_kw = ["BNO","8NO","POS","TAX","INCLUDED","ใบเสร็จ","โปรโม",
-               "ส่วนลด","แต้ม","ขอบคุณ","สาขา","RECEIPT","สมาชิก","ID:","QR","User"]
+               "ส่วนลด","แต้ม","แต่ม","ขอบคุณ","สาขา","RECEIPT","INVOICE",
+               "สมาชิก","ID:","QR","User","หวานน้อย","ลดน้ำตาล",
+               "www.","FB:","ร้องเรียน","สมัคร"]
+
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
+    # รองรับ qty เป็นตัวเลขหรือ "-"
     _QTY    = r'(?:\d+|-)'
-    _full = re.compile(r'^[\.]?\s*('+_QTY+r')\s*(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})'+_SUFFIX+r'$')
-    _fb_a = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})'+_SUFFIX+r'$')
-    _fb_b = re.compile(r'^[\.]?\s*('+_QTY+r')\s*(.+?)\s+(\d+[.,]\d{2})'+_SUFFIX+r'$')
-    _fb_c = re.compile(r'^[\.]?\s*('+_QTY+r')\s*(.+?)\s+(\d+[.,]\d{2})\s*$')
+    _full = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_a = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_b = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_c = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s*$')
 
     for line in lines[start_idx:]:
         line = line.strip()
         if not line: continue
         compact = _collapse(line)
+
+        # หยุดเมื่อเจอ keyword สรุปบิล
         if any(k in line or k in compact for k in stop_kw): break
         if re.search(r'จ.{0,3}นวนส', compact): break
+        if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
-        if re.search(r'-\s*\d+[.,]\d{2}', line): continue
+        if re.search(r'-\s*\d+[.,]\d{2}', line): continue   # ส่วนลด (ติดลบ)
         if len(line) < 4: continue
+
+        # ทำความสะอาดบรรทัด
         line_clean = re.sub(r'^[.\[\]>"\'`*]+\s*', '', line.strip())
         if not line_clean: line_clean = line.strip()
+        # ลบ V/v ท้ายบรรทัดที่อาจเหลืออยู่
         line_clean = re.sub(r'\s+[Vv]\s*$', '', line_clean).strip()
         lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$', '', line_clean).strip())
+
         m = _full.match(lf)
         if m:
             qty_raw, nm, up, tp = m.groups()
@@ -1121,355 +1626,488 @@ def extract_items_cj(text: str) -> list:
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                 u = parse_price(up); tt = parse_price(tp)
                 if tt < u * 0.5: tt = round(u * qty, 2)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":qty,"ราคาต่อหน่วย":u,"ยอดรวมสินค้า":tt})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
+                              "ราคาต่อหน่วย": u, "ยอดรวมสินค้า": tt})
             continue
+
         m = _fb_a.match(lf)
         if m:
-            nm, up, tp = m.groups(); nm = _clean_item_name(nm)
+            nm, up, tp = m.groups()
+            nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
-                items.append({"ชื่อสินค้า":nm,"จำนวน":1,"ราคาต่อหน่วย":parse_price(up),"ยอดรวมสินค้า":parse_price(tp)})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": 1,
+                              "ราคาต่อหน่วย": parse_price(up),
+                              "ยอดรวมสินค้า": parse_price(tp)})
             continue
+
         m = _fb_b.match(lf)
         if m:
-            qty_raw, nm, price = m.groups(); qty = 1 if qty_raw == '-' else int(qty_raw)
+            qty_raw, nm, price = m.groups()
+            qty = 1 if qty_raw == '-' else int(qty_raw)
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":qty,"ราคาต่อหน่วย":p,"ยอดรวมสินค้า":round(p*qty,2)})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
+                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": round(p * qty, 2)})
             continue
+
         m = _fb_c.match(lf)
         if m:
-            qty_raw, nm, price = m.groups(); qty = 1 if qty_raw == '-' else int(qty_raw)
-            nm = re.sub(r'\s+[0-9]+[.,][0-9]{2}\s*', ' ', nm); nm = _clean_item_name(nm)
+            qty_raw, nm, price = m.groups()
+            qty = 1 if qty_raw == '-' else int(qty_raw)
+            nm = re.sub(r'\s+[0-9]+[.,][0-9]{2}\s*', ' ', nm)
+            nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z]', '', nm)) >= 3:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":qty,"ราคาต่อหน่วย":p,"ยอดรวมสินค้า":round(p*qty,2)})
+                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
+                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": round(p * qty, 2)})
+
     return items
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# ██  Excel export (เพิ่ม ประเภทสินค้า + Sheet 2)  ██
+# Excel export
 # ─────────────────────────────────────────────────────────────────────────────
+# เดิม
 def build_excel(all_bills: list) -> bytes:
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        # ── Sheet 1: รายการสินค้าทั้งหมด ──
         rows = []
         for b in all_bills:
             d = b['bill']
             base = {"ไฟล์":b['filename'],"วันที่":d['date'],"เวลา":d['time'],
-                    "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],"เลขที่ใบเสร็จ":d['rcpt_no']}
+                    "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],
+                    "เลขที่ใบเสร็จ":d['rcpt_no']}
             for it in (b['items'] or []):
                 row = base.copy()
-                row.update({
-                    "ประเภทสินค้า":  it.get("ประเภทสินค้า","ไม่ระบุ"),
-                    "ชื่อสินค้า":    it.get('ชื่อสินค้า',''),
-                    "จำนวน":         it.get('จำนวน',1),
-                    "ราคาต่อหน่วย":  it.get('ราคาต่อหน่วย',0),
-                    "ยอดรวมสินค้า":  it.get('ยอดรวมสินค้า',0),
-                    "ยอดรวม":        "",
-                })
+                row.update({"ชื่อสินค้า":it.get('ชื่อสินค้า',''),
+                            "จำนวน":it.get('จำนวน',1),
+                            "ราคาต่อหน่วย":it.get('ราคาต่อหน่วย',0),
+                            "ยอดรวมสินค้า":it.get('ยอดรวมสินค้า',0),
+                            "ยอดรวม":"","เงินสด":"","เงินทอน":""})   # ← ลบ เงินสด เงินทอน
                 rows.append(row)
             summary = base.copy()
-            summary.update({"ประเภทสินค้า":"","ชื่อสินค้า":"","จำนวน":"",
-                            "ราคาต่อหน่วย":"","ยอดรวมสินค้า":"","ยอดรวม":d['total_amount']})
+            summary.update({"ชื่อสินค้า":"","จำนวน":"","ราคาต่อหน่วย":"","ยอดรวมสินค้า":"",
+                            "ยอดรวม":d['total_amount'],"เงินสด":d['cash'],             # ← ลบ
+                            "เงินทอน":d['change']})                                     # ← ลบ
             rows.append(summary)
-        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name='รายการสินค้า')
-        # ── Sheet 2: สรุปแยกประเภท ──
-        cat_totals: dict = {}; cat_counts: dict = {}
+        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name='ใบเสร็จ')
+    return output.getvalue()
+
+# ใหม่
+def build_excel(all_bills: list) -> bytes:
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        rows = []
         for b in all_bills:
+            d = b['bill']
+            base = {"ไฟล์":b['filename'],"วันที่":d['date'],"เวลา":d['time'],
+                    "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],
+                    "เลขที่ใบเสร็จ":d['rcpt_no']}
             for it in (b['items'] or []):
-                cat = it.get("ประเภทสินค้า","ไม่ระบุ")
-                cat_totals[cat] = round(cat_totals.get(cat,0)+float(it.get("ยอดรวมสินค้า",0)),2)
-                cat_counts[cat] = cat_counts.get(cat,0)+int(it.get("จำนวน",1))
-        if cat_totals:
-            total_all = sum(cat_totals.values())
-            summary_rows = []
-            for cat in CATEGORIES+(["ไม่ระบุ"] if "ไม่ระบุ" in cat_totals else []):
-                if cat in cat_totals:
-                    summary_rows.append({
-                        "ประเภทสินค้า": f"{CATEGORY_EMOJI.get(cat,'📦')} {cat}",
-                        "จำนวนชิ้น":    cat_counts.get(cat,0),
-                        "ยอดรวม (฿)":   cat_totals.get(cat,0),
-                        "% ของทั้งหมด": f"{cat_totals[cat]/total_all*100:.1f}%" if total_all else "0%",
-                    })
-            pd.DataFrame(summary_rows).to_excel(writer, index=False, sheet_name='สรุปตามประเภท')
+                row = base.copy()
+                row.update({"ชื่อสินค้า":it.get('ชื่อสินค้า',''),
+                            "จำนวน":it.get('จำนวน',1),
+                            "ราคาต่อหน่วย":it.get('ราคาต่อหน่วย',0),
+                            "ยอดรวมสินค้า":it.get('ยอดรวมสินค้า',0),
+                            "ยอดรวม":""})
+                rows.append(row)
+            summary = base.copy()
+            summary.update({"ชื่อสินค้า":"","จำนวน":"","ราคาต่อหน่วย":"","ยอดรวมสินค้า":"",
+                            "ยอดรวม":d['total_amount']})
+            rows.append(summary)
+        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name='ใบเสร็จ')
     return output.getvalue()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Interactive crop canvas
+# ─────────────────────────────────────────────────────────────────────────────
 def _compute_split_positions(pil_img: Image.Image, n_bills: int) -> list:
-    if n_bills <= 1: return []
-    img_cv = pil_to_cv(pil_img); h, w = img_cv.shape[:2]
+    if n_bills <= 1:
+        return []
+    img_cv = pil_to_cv(pil_img)
+    h, w = img_cv.shape[:2]
     gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
     col_ratio = (gray > 180).astype(np.uint8).mean(axis=0)
     splits, smooth, _ = _find_bill_splits(col_ratio, w, min_bill_frac=0.12, n_expected=n_bills)
-    if len(splits) >= n_bills - 1: return [s / w for s in splits[:n_bills - 1]]
+    if len(splits) >= n_bills - 1:
+        return [s / w for s in splits[:n_bills - 1]]
     return [i / n_bills for i in range(1, n_bills)]
 
-def crop_component_html(pil_img: Image.Image, crop_mode: str = "free",
-                        bill_count: int = 1, component_key: str = "crop1") -> str:
-    b64 = img_to_b64(pil_img); orig_w, orig_h = pil_img.size
+
+def crop_component_html(pil_img: Image.Image,
+                        crop_mode: str = "free",
+                        bill_count: int = 1,
+                        component_key: str = "crop1") -> str:
+    b64 = img_to_b64(pil_img)
+    orig_w, orig_h = pil_img.size
     is_a4 = "true" if crop_mode == "a4" else "false"
     split_fracs = _compute_split_positions(pil_img, bill_count) if bill_count > 1 else []
-    split_js = json.dumps(split_fracs); n_bills_js = bill_count
-    label_hint = {1:"ลากบนรูปเพื่อเลือกพื้นที่ที่ต้องการ Crop",
-                  2:"เส้นแดง = จุดตัดบิล · ลากปรับตำแหน่งได้ · ลากบนรูปเพื่อ Crop",
-                  3:"เส้นแดง = จุดตัดบิล · ลากปรับได้ · ลากบนรูปเพื่อ Crop"}.get(bill_count,"ลาก")
+    split_js = json.dumps(split_fracs)
+    n_bills_js = bill_count
+    label_hint = {
+        1: "ลากบนรูปเพื่อเลือกพื้นที่ที่ต้องการ Crop",
+        2: "เส้นแดง = จุดตัดบิล · ลากปรับตำแหน่งได้ · ลากบนรูปเพื่อ Crop",
+        3: "เส้นแดง = จุดตัดบิล · ลากปรับได้ · ลากบนรูปเพื่อ Crop",
+    }.get(bill_count, "ลากบนรูปเพื่อเลือกพื้นที่")
+
     return f"""<!DOCTYPE html><html><head><meta charset="utf-8">
-<style>*{{box-sizing:border-box;margin:0;padding:0}}body{{background:#f0eefc;font-family:sans-serif;padding:8px}}
+<style>
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{background:#f0eefc;font-family:sans-serif;padding:8px}}
 #wrap{{position:relative;display:inline-block;border:2px solid #534AB7;border-radius:8px;overflow:hidden;cursor:crosshair}}
-canvas{{display:block}}#info{{margin-top:8px;font-size:13px;color:#534AB7;line-height:1.5}}
+canvas{{display:block}}
+#info{{margin-top:8px;font-size:13px;color:#534AB7;line-height:1.5}}
 #result{{margin-top:6px;font-size:12px;background:#EEEDFE;border-radius:6px;padding:6px 10px;color:#3C3489;display:none}}
 #split-info{{margin-top:6px;font-size:12px;background:#FEF2F2;border-radius:6px;padding:6px 10px;color:#991B1B;display:none;line-height:1.6}}
 button{{margin-top:8px;margin-right:6px;padding:7px 16px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:600}}
-#btn-confirm{{background:#534AB7;color:#fff}}#btn-confirm:disabled{{opacity:.4;cursor:not-allowed}}
+#btn-confirm{{background:#534AB7;color:#fff}}
+#btn-confirm:disabled{{opacity:.4;cursor:not-allowed}}
 #btn-reset{{background:#f1f0f0;color:#444}}
-textarea#data-out{{width:100%;margin-top:8px;font-size:11px;font-family:monospace;height:60px;border-radius:6px;border:1px solid #ddd;padding:6px;display:none}}
+textarea#data-out{{width:100%;margin-top:8px;font-size:11px;font-family:monospace;
+  height:60px;border-radius:6px;border:1px solid #ddd;padding:6px;display:none}}
 </style></head><body>
 <div id="wrap"><canvas id="c"></canvas></div>
-<div id="info">{label_hint}</div><div id="result"></div><div id="split-info"></div><br>
-<button id="btn-confirm" disabled>✅ ยืนยัน Crop</button><button id="btn-reset">🔄 วาดใหม่</button><br>
-<div style="margin-top:10px;font-size:12px;color:#666">👇 คัดลอกข้อความนี้ไปวางในช่อง "ข้อมูล Crop" ด้านล่าง</div>
+<div id="info">{label_hint}</div>
+<div id="result"></div>
+<div id="split-info"></div><br>
+<button id="btn-confirm" disabled>✅ ยืนยัน Crop</button>
+<button id="btn-reset">🔄 วาดใหม่</button>
+<br>
+<div style="margin-top:10px;font-size:12px;color:#666">
+👇 คัดลอกข้อความนี้ไปวางในช่อง "ข้อมูล Crop" ด้านล่างเพื่อยืนยัน
+</div>
 <textarea id="data-out" readonly onclick="this.select()"></textarea>
 <script>
-const IMG_W={orig_w},IMG_H={orig_h},A4={is_a4},N_BILLS={n_bills_js};
-const SPLIT_FRACS={split_js};
-const canvas=document.getElementById('c'),ctx=canvas.getContext('2d');
-const MAX_W=660,MAX_H=460;
-let scaleX,scaleY,sx,sy,ex,ey,drawing=false,hasCrop=false,cropRect=null;
-let splitLines=SPLIT_FRACS.map(f=>({{frac:f,dragging:false}}));
-let dragSplitIdx=-1,dragStartX=0,dragStartFrac=0;
-const img=new Image();
-img.onload=()=>{{
-  let dw=Math.min(IMG_W,MAX_W),dh=dw*IMG_H/IMG_W;
-  if(dh>MAX_H){{dh=MAX_H;dw=dh*IMG_W/IMG_H;}}
-  canvas.width=Math.round(dw);canvas.height=Math.round(dh);
-  scaleX=IMG_W/canvas.width;scaleY=IMG_H/canvas.height;
-  draw();updateSplitInfo();
-  cropRect={{x:0,y:0,w:canvas.width,h:canvas.height}};hasCrop=true;draw();finalise();
+const IMG_W={orig_w}, IMG_H={orig_h}, A4={is_a4}, N_BILLS={n_bills_js};
+const SPLIT_FRACS = {split_js};
+const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+const MAX_W = 660, MAX_H = 460;
+let scaleX, scaleY;
+let sx, sy, ex, ey, drawing = false, hasCrop = false, cropRect = null;
+let splitLines = SPLIT_FRACS.map(f => ({{frac: f, dragging: false}}));
+let dragSplitIdx = -1, dragStartX = 0, dragStartFrac = 0;
+const img = new Image();
+img.onload = () => {{
+  let dw = Math.min(IMG_W, MAX_W), dh = dw * IMG_H / IMG_W;
+  if (dh > MAX_H) {{ dh = MAX_H; dw = dh * IMG_W / IMG_H; }}
+  canvas.width = Math.round(dw); canvas.height = Math.round(dh);
+  scaleX = IMG_W / canvas.width; scaleY = IMG_H / canvas.height;
+  draw(); updateSplitInfo();
+  cropRect = {{x:0, y:0, w:canvas.width, h:canvas.height}};
+  hasCrop = true; draw(); finalise();
 }};
-img.src='data:image/png;base64,{b64}';
-function draw(){{
-  ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height);
-  if(hasCrop&&cropRect)drawCropBox();if(N_BILLS>1)drawSplitLines();
+img.src = 'data:image/png;base64,{b64}';
+function draw() {{
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  if (hasCrop && cropRect) drawCropBox();
+  if (N_BILLS > 1) drawSplitLines();
 }}
-function drawCropBox(){{
-  const{{x,y,w,h}}=cropRect;
-  ctx.fillStyle='rgba(0,0,0,0.30)';
-  ctx.fillRect(0,0,canvas.width,y);ctx.fillRect(0,y+h,canvas.width,canvas.height-y-h);
-  ctx.fillRect(0,y,x,h);ctx.fillRect(x+w,y,canvas.width-x-w,h);
-  ctx.strokeStyle='#534AB7';ctx.lineWidth=2;ctx.setLineDash([]);ctx.strokeRect(x,y,w,h);
-  [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([cx,cy])=>{{ctx.fillStyle='#534AB7';ctx.fillRect(cx-5,cy-5,10,10);}});
-  ctx.strokeStyle='rgba(255,255,255,0.35)';ctx.lineWidth=0.5;ctx.setLineDash([4,4]);
-  ctx.beginPath();ctx.moveTo(x+w/3,y);ctx.lineTo(x+w/3,y+h);ctx.moveTo(x+w*2/3,y);ctx.lineTo(x+w*2/3,y+h);
-  ctx.moveTo(x,y+h/3);ctx.lineTo(x+w,y+h/3);ctx.moveTo(x,y+h*2/3);ctx.lineTo(x+w,y+h*2/3);
-  ctx.stroke();ctx.setLineDash([]);
-}}
-function drawSplitLines(){{
-  splitLines.forEach((sl,i)=>{{
-    const px=Math.round(sl.frac*canvas.width);
-    ctx.shadowColor='rgba(220,0,0,0.4)';ctx.shadowBlur=6;
-    ctx.strokeStyle='#EF4444';ctx.lineWidth=2.5;ctx.setLineDash([8,5]);
-    ctx.beginPath();ctx.moveTo(px,0);ctx.lineTo(px,canvas.height);ctx.stroke();
-    ctx.setLineDash([]);ctx.shadowBlur=0;
-    const mid=canvas.height/2;ctx.fillStyle='#EF4444';
-    ctx.beginPath();ctx.arc(px,mid,10,0,Math.PI*2);ctx.fill();
-    ctx.fillStyle='#fff';ctx.font='bold 9px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText('↔',px,mid);
-    const prevPx=i===0?0:Math.round(splitLines[i-1].frac*canvas.width);
-    const labelX=(prevPx+px)/2;const lbl=`บิล ${{i+1}}`;const tw=ctx.measureText(lbl).width+16;
-    ctx.fillStyle='rgba(239,68,68,0.85)';ctx.beginPath();
-    ctx.roundRect?ctx.roundRect(labelX-tw/2,6,tw,20,6):ctx.rect(labelX-tw/2,6,tw,20);ctx.fill();
-    ctx.fillStyle='#fff';ctx.font='bold 11px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
-    ctx.fillText(lbl,labelX,16);
+function drawCropBox() {{
+  const {{x, y, w, h}} = cropRect;
+  ctx.fillStyle = 'rgba(0,0,0,0.30)';
+  ctx.fillRect(0, 0, canvas.width, y);
+  ctx.fillRect(0, y + h, canvas.width, canvas.height - y - h);
+  ctx.fillRect(0, y, x, h);
+  ctx.fillRect(x + w, y, canvas.width - x - w, h);
+  ctx.strokeStyle = '#534AB7'; ctx.lineWidth = 2; ctx.setLineDash([]);
+  ctx.strokeRect(x, y, w, h);
+  [[x,y],[x+w,y],[x,y+h],[x+w,y+h]].forEach(([cx,cy]) => {{
+    ctx.fillStyle = '#534AB7'; ctx.fillRect(cx-5, cy-5, 10, 10);
   }});
-  const lastPx=splitLines.length>0?Math.round(splitLines[splitLines.length-1].frac*canvas.width):0;
-  const lastLbl=`บิล ${{N_BILLS}}`;const tw2=ctx.measureText(lastLbl).width+16;const labelX2=(lastPx+canvas.width)/2;
-  ctx.fillStyle='rgba(239,68,68,0.85)';ctx.beginPath();
-  ctx.roundRect?ctx.roundRect(labelX2-tw2/2,6,tw2,20,6):ctx.rect(labelX2-tw2/2,6,tw2,20);ctx.fill();
-  ctx.fillStyle='#fff';ctx.font='bold 11px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
-  ctx.fillText(lastLbl,labelX2,16);
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)'; ctx.lineWidth = 0.5; ctx.setLineDash([4,4]);
+  ctx.beginPath();
+  ctx.moveTo(x+w/3,y); ctx.lineTo(x+w/3,y+h);
+  ctx.moveTo(x+w*2/3,y); ctx.lineTo(x+w*2/3,y+h);
+  ctx.moveTo(x,y+h/3); ctx.lineTo(x+w,y+h/3);
+  ctx.moveTo(x,y+h*2/3); ctx.lineTo(x+w,y+h*2/3);
+  ctx.stroke(); ctx.setLineDash([]);
 }}
-function getSplitHitIdx(px){{for(let i=0;i<splitLines.length;i++){{if(Math.abs(px-splitLines[i].frac*canvas.width)<=14)return i;}}return -1;}}
-function updateSplitInfo(){{
-  if(N_BILLS<=1)return;const info=document.getElementById('split-info');info.style.display='block';
-  let fracs=[0,...splitLines.map(s=>s.frac),1.0];let parts=[];
-  for(let i=0;i<N_BILLS;i++){{const pct=Math.round((fracs[i+1]-fracs[i])*100);parts.push(`บิล ${{i+1}}: ${{pct}}%`);}}
-  info.innerHTML='🔴 จุดตัด: '+splitLines.map(s=>`<b>${{Math.round(s.frac*IMG_W)}}px</b>`).join(' · ')+'<br>'+parts.join(' &nbsp;|&nbsp; ');
+function drawSplitLines() {{
+  splitLines.forEach((sl, i) => {{
+    const px = Math.round(sl.frac * canvas.width);
+    ctx.shadowColor = 'rgba(220,0,0,0.4)'; ctx.shadowBlur = 6;
+    ctx.strokeStyle = '#EF4444'; ctx.lineWidth = 2.5; ctx.setLineDash([8, 5]);
+    ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, canvas.height); ctx.stroke();
+    ctx.setLineDash([]); ctx.shadowBlur = 0;
+    const mid = canvas.height / 2;
+    ctx.fillStyle = '#EF4444';
+    ctx.beginPath(); ctx.arc(px, mid, 10, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 9px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('↔', px, mid);
+    const prevPx = i === 0 ? 0 : Math.round(splitLines[i-1].frac * canvas.width);
+    const labelX = (prevPx + px) / 2;
+    const lbl = `บิล ${{i+1}}`;
+    const tw = ctx.measureText(lbl).width + 16;
+    ctx.fillStyle = 'rgba(239,68,68,0.85)';
+    ctx.beginPath();
+    ctx.roundRect ? ctx.roundRect(labelX - tw/2, 6, tw, 20, 6) : ctx.rect(labelX - tw/2, 6, tw, 20);
+    ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(lbl, labelX, 16);
+  }});
+  const lastPx = splitLines.length > 0 ? Math.round(splitLines[splitLines.length-1].frac * canvas.width) : 0;
+  const lastLbl = `บิล ${{N_BILLS}}`;
+  const tw2 = ctx.measureText(lastLbl).width + 16;
+  const labelX2 = (lastPx + canvas.width) / 2;
+  ctx.fillStyle = 'rgba(239,68,68,0.85)';
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(labelX2 - tw2/2, 6, tw2, 20, 6) : ctx.rect(labelX2 - tw2/2, 6, tw2, 20);
+  ctx.fill();
+  ctx.fillStyle = '#fff'; ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(lastLbl, labelX2, 16);
 }}
-function getPos(e){{
-  const r=canvas.getBoundingClientRect();
-  const cx=(e.touches?e.touches[0].clientX:e.clientX)-r.left;
-  const cy=(e.touches?e.touches[0].clientY:e.clientY)-r.top;
-  return[Math.max(0,Math.min(cx,canvas.width)),Math.max(0,Math.min(cy,canvas.height))];
-}}
-canvas.addEventListener('mousedown',e=>{{
-  const[px,py]=getPos(e);dragSplitIdx=getSplitHitIdx(px);
-  if(dragSplitIdx>=0){{dragStartX=px;dragStartFrac=splitLines[dragSplitIdx].frac;canvas.style.cursor='ew-resize';return;}}
-  drawing=true;sx=px;sy=py;hasCrop=false;
-}});
-canvas.addEventListener('mousemove',e=>{{
-  const[px,py]=getPos(e);
-  if(dragSplitIdx>=0){{
-    let newFrac=dragStartFrac+(px-dragStartX)/canvas.width;
-    const minF=dragSplitIdx>0?splitLines[dragSplitIdx-1].frac+0.03:0.03;
-    const maxF=dragSplitIdx<splitLines.length-1?splitLines[dragSplitIdx+1].frac-0.03:0.97;
-    splitLines[dragSplitIdx].frac=Math.max(minF,Math.min(maxF,newFrac));
-    draw();updateSplitInfo();finalise();return;
+function getSplitHitIdx(px) {{
+  for (let i = 0; i < splitLines.length; i++) {{
+    const lx = splitLines[i].frac * canvas.width;
+    if (Math.abs(px - lx) <= 14) return i;
   }}
-  if(drawing){{
-    ex=px;ey=py;let w=ex-sx,h=ey-sy;
-    if(A4)h=Math.abs(w)*1.4142*Math.sign(h);
-    cropRect={{x:Math.min(sx,ex),y:Math.min(sy,ey),w:Math.abs(w),h:Math.abs(h)}};hasCrop=true;draw();return;
-  }}
-  canvas.style.cursor=getSplitHitIdx(px)>=0?'ew-resize':'crosshair';
-}});
-canvas.addEventListener('mouseup',e=>{{
-  if(dragSplitIdx>=0){{dragSplitIdx=-1;canvas.style.cursor='crosshair';draw();finalise();return;}}
-  drawing=false;finalise();
-}});
-canvas.addEventListener('mouseleave',()=>{{if(dragSplitIdx>=0){{dragSplitIdx=-1;draw();finalise();}}drawing=false;}});
-canvas.addEventListener('touchstart',e=>{{
-  e.preventDefault();const[px,py]=getPos(e);dragSplitIdx=getSplitHitIdx(px);
-  if(dragSplitIdx>=0){{dragStartX=px;dragStartFrac=splitLines[dragSplitIdx].frac;return;}}
-  drawing=true;sx=px;sy=py;hasCrop=false;
-}},{{passive:false}});
-canvas.addEventListener('touchmove',e=>{{
-  e.preventDefault();const[px,py]=getPos(e);
-  if(dragSplitIdx>=0){{
-    let newFrac=dragStartFrac+(px-dragStartX)/canvas.width;
-    const minF=dragSplitIdx>0?splitLines[dragSplitIdx-1].frac+0.03:0.03;
-    const maxF=dragSplitIdx<splitLines.length-1?splitLines[dragSplitIdx+1].frac-0.03:0.97;
-    splitLines[dragSplitIdx].frac=Math.max(minF,Math.min(maxF,newFrac));
-    draw();updateSplitInfo();return;
-  }}
-  if(!drawing)return;ex=px;ey=py;let w=ex-sx,h=ey-sy;
-  if(A4)h=Math.abs(w)*1.4142*Math.sign(h);
-  cropRect={{x:Math.min(sx,ex),y:Math.min(sy,ey),w:Math.abs(w),h:Math.abs(h)}};hasCrop=true;draw();
-}},{{passive:false}});
-canvas.addEventListener('touchend',e=>{{
-  e.preventDefault();if(dragSplitIdx>=0){{dragSplitIdx=-1;draw();finalise();return;}}drawing=false;finalise();
-}},{{passive:false}});
-function finalise(){{
-  if(!hasCrop||!cropRect||cropRect.w<10||cropRect.h<10)return;
-  const ox=Math.round(cropRect.x*scaleX),oy=Math.round(cropRect.y*scaleY);
-  const ow=Math.round(cropRect.w*scaleX),oh=Math.round(cropRect.h*scaleY);
-  const splitPx=splitLines.map(s=>Math.round(s.frac*IMG_W));
-  document.getElementById('result').style.display='block';
-  document.getElementById('result').textContent=`เลือก: ${{ow}}×${{oh}} px (ตำแหน่ง ${{ox}},${{oy}})`+(splitPx.length?`  |  จุดตัด: ${{splitPx.join(', ')}} px`:'');
-  const btn=document.getElementById('btn-confirm');btn.disabled=false;
-  const dataObj={{x:ox,y:oy,w:ow,h:oh,splits:splitPx}};
-  const out=document.getElementById('data-out');out.style.display='block';out.value=JSON.stringify(dataObj);
+  return -1;
 }}
-document.getElementById('btn-confirm').onclick=()=>{{const out=document.getElementById('data-out');out.select();document.execCommand('copy');out.style.background='#d1fae5';}};
-document.getElementById('btn-reset').onclick=()=>{{
-  hasCrop=false;cropRect=null;splitLines=SPLIT_FRACS.map(f=>({{frac:f,dragging:false}}));
-  document.getElementById('result').style.display='none';document.getElementById('btn-confirm').disabled=true;
-  document.getElementById('data-out').style.display='none';draw();updateSplitInfo();
+function updateSplitInfo() {{
+  if (N_BILLS <= 1) return;
+  const info = document.getElementById('split-info');
+  info.style.display = 'block';
+  let fracs = [0, ...splitLines.map(s => s.frac), 1.0];
+  let parts = [];
+  for (let i = 0; i < N_BILLS; i++) {{
+    const pct = Math.round((fracs[i+1] - fracs[i]) * 100);
+    const px = Math.round(fracs[i+1] * IMG_W) - Math.round(fracs[i] * IMG_W);
+    parts.push(`บิล ${{i+1}}: ${{pct}}% (${{px}}px)`);
+  }}
+  info.innerHTML = '🔴 จุดตัด: ' + splitLines.map((s,i) =>
+    `<b>${{Math.round(s.frac * IMG_W)}}px</b>`).join(' · ') +
+    '<br>' + parts.join(' &nbsp;|&nbsp; ');
+}}
+function getPos(e) {{
+  const r = canvas.getBoundingClientRect();
+  const cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+  const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+  return [Math.max(0, Math.min(cx, canvas.width)), Math.max(0, Math.min(cy, canvas.height))];
+}}
+canvas.addEventListener('mousedown', e => {{
+  const [px, py] = getPos(e);
+  dragSplitIdx = getSplitHitIdx(px);
+  if (dragSplitIdx >= 0) {{ dragStartX = px; dragStartFrac = splitLines[dragSplitIdx].frac; canvas.style.cursor = 'ew-resize'; return; }}
+  drawing = true; sx = px; sy = py; hasCrop = false;
+}});
+canvas.addEventListener('mousemove', e => {{
+  const [px, py] = getPos(e);
+  if (dragSplitIdx >= 0) {{
+    let newFrac = dragStartFrac + (px - dragStartX) / canvas.width;
+    const minF = dragSplitIdx > 0 ? splitLines[dragSplitIdx-1].frac + 0.03 : 0.03;
+    const maxF = dragSplitIdx < splitLines.length-1 ? splitLines[dragSplitIdx+1].frac - 0.03 : 0.97;
+    splitLines[dragSplitIdx].frac = Math.max(minF, Math.min(maxF, newFrac));
+    draw(); updateSplitInfo(); finalise(); return;
+  }}
+  if (drawing) {{
+    ex = px; ey = py;
+    let w = ex - sx, h = ey - sy;
+    if (A4) h = Math.abs(w) * 1.4142 * Math.sign(h);
+    cropRect = {{x: Math.min(sx,ex), y: Math.min(sy,ey), w: Math.abs(w), h: Math.abs(h)}};
+    hasCrop = true; draw(); return;
+  }}
+  canvas.style.cursor = getSplitHitIdx(px) >= 0 ? 'ew-resize' : 'crosshair';
+}});
+canvas.addEventListener('mouseup', e => {{
+  if (dragSplitIdx >= 0) {{ dragSplitIdx = -1; canvas.style.cursor = 'crosshair'; draw(); finalise(); return; }}
+  drawing = false; finalise();
+}});
+canvas.addEventListener('mouseleave', () => {{
+  if (dragSplitIdx >= 0) {{ dragSplitIdx = -1; draw(); finalise(); }}
+  drawing = false;
+}});
+canvas.addEventListener('touchstart', e => {{
+  e.preventDefault();
+  const [px,py] = getPos(e);
+  dragSplitIdx = getSplitHitIdx(px);
+  if (dragSplitIdx >= 0) {{ dragStartX = px; dragStartFrac = splitLines[dragSplitIdx].frac; return; }}
+  drawing = true; sx = px; sy = py; hasCrop = false;
+}}, {{passive:false}});
+canvas.addEventListener('touchmove', e => {{
+  e.preventDefault();
+  const [px,py] = getPos(e);
+  if (dragSplitIdx >= 0) {{
+    let newFrac = dragStartFrac + (px - dragStartX) / canvas.width;
+    const minF = dragSplitIdx > 0 ? splitLines[dragSplitIdx-1].frac + 0.03 : 0.03;
+    const maxF = dragSplitIdx < splitLines.length-1 ? splitLines[dragSplitIdx+1].frac - 0.03 : 0.97;
+    splitLines[dragSplitIdx].frac = Math.max(minF, Math.min(maxF, newFrac));
+    draw(); updateSplitInfo(); return;
+  }}
+  if (!drawing) return;
+  ex = px; ey = py;
+  let w = ex-sx, h = ey-sy;
+  if (A4) h = Math.abs(w)*1.4142*Math.sign(h);
+  cropRect = {{x:Math.min(sx,ex),y:Math.min(sy,ey),w:Math.abs(w),h:Math.abs(h)}};
+  hasCrop = true; draw();
+}}, {{passive:false}});
+canvas.addEventListener('touchend', e => {{
+  e.preventDefault();
+  if (dragSplitIdx >= 0) {{ dragSplitIdx = -1; draw(); finalise(); return; }}
+  drawing = false; finalise();
+}}, {{passive:false}});
+function finalise() {{
+  if (!hasCrop || !cropRect || cropRect.w < 10 || cropRect.h < 10) return;
+  const ox = Math.round(cropRect.x * scaleX), oy = Math.round(cropRect.y * scaleY);
+  const ow = Math.round(cropRect.w * scaleX), oh = Math.round(cropRect.h * scaleY);
+  const splitPx = splitLines.map(s => Math.round(s.frac * IMG_W));
+  document.getElementById('result').style.display = 'block';
+  document.getElementById('result').textContent =
+    `เลือก: ${{ow}}×${{oh}} px (ตำแหน่ง ${{ox}},${{oy}})` +
+    (splitPx.length ? `  |  จุดตัด: ${{splitPx.join(', ')}} px` : '');
+  const btn = document.getElementById('btn-confirm');
+  btn.disabled = false;
+  const dataObj = {{x:ox, y:oy, w:ow, h:oh, splits:splitPx}};
+  btn.dataset.crop = JSON.stringify(dataObj);
+  const out = document.getElementById('data-out');
+  out.style.display = 'block';
+  out.value = JSON.stringify(dataObj);
+}}
+document.getElementById('btn-confirm').onclick = () => {{
+  const out = document.getElementById('data-out');
+  out.select();
+  document.execCommand('copy');
+  out.style.background = '#d1fae5';
+}};
+document.getElementById('btn-reset').onclick = () => {{
+  hasCrop = false; cropRect = null;
+  splitLines = SPLIT_FRACS.map(f => ({{frac: f, dragging: false}}));
+  document.getElementById('result').style.display = 'none';
+  document.getElementById('btn-confirm').disabled = true;
+  document.getElementById('data-out').style.display = 'none';
+  draw(); updateSplitInfo();
 }};
 </script></body></html>"""
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Batch mode
+# ─────────────────────────────────────────────────────────────────────────────
 def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = False,
                         ocr_engine: str = "tesseract") -> list:
-    results = []; n = len(files)
+    results = []
+    n = len(files)
     for i, (fname, fbytes) in enumerate(files, 1):
         if progress_cb: progress_cb(i, n, fname)
         try:
-            pil = Image.open(io.BytesIO(fbytes)).convert("RGB"); img_cv = pil_to_cv(pil)
-            sub_crops = auto_crop_receipts(img_cv) if auto_detect_multi else [img_cv]
+            pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
+            img_cv = pil_to_cv(pil)
+            if auto_detect_multi:
+                sub_crops = auto_crop_receipts(img_cv)
+            else:
+                sub_crops = [img_cv]
             if len(sub_crops) == 1:
                 st.session_state["_gdrive_raw_texts"] = []
-                text = run_ocr(sub_crops[0], engine=ocr_engine)
+                text       = run_ocr(sub_crops[0], engine=ocr_engine)
                 gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
                 text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
                 if is_gemini_configured() and text_for_gemini.strip():
-                    gr = extract_with_gemini(text_for_gemini, ocr_source="gdrive" if ocr_engine=="gdrive" else "tesseract")
+                    gr    = extract_with_gemini(
+                        text_for_gemini,
+                        ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract"
+                    )
                     bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                     items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                 else:
-                    bill = extract_receipt(text); items = extract_items_cj(text)
-                # ── จัดประเภทสินค้า ──
-                if items and is_gemini_configured():
-                    items = classify_items_with_gemini(items)
-                results.append({"filename":fname,"bill":bill,"items":items,
-                                "raw_text":text,"gdrive_raw":gdrive_raw,
-                                "image":img_to_bytes_png(sub_crops[0])})
+                    bill  = extract_receipt(text)
+                    items = extract_items_cj(text)
+                results.append({"filename": fname, "bill": bill, "items": items,
+                                "raw_text": text, "gdrive_raw": gdrive_raw,
+                                "image": img_to_bytes_png(sub_crops[0])})
             else:
                 for ci, crop in enumerate(sub_crops, 1):
                     label = f"{fname} — บิล {ci}"
                     st.session_state["_gdrive_raw_texts"] = []
-                    text = run_ocr(crop, engine=ocr_engine)
+                    text       = run_ocr(crop, engine=ocr_engine)
                     gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                    text_for_gemini = gdrive_raw if (ocr_engine=="gdrive" and gdrive_raw) else text
+                    text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
                     if is_gemini_configured() and text_for_gemini.strip():
-                        gr = extract_with_gemini(text_for_gemini, ocr_source="gdrive" if ocr_engine=="gdrive" else "tesseract")
+                        gr    = extract_with_gemini(
+                            text_for_gemini,
+                            ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract"
+                        )
                         bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                         items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                     else:
-                        bill = extract_receipt(text); items = extract_items_cj(text)
-                    # ── จัดประเภทสินค้า ──
-                    if items and is_gemini_configured():
-                        items = classify_items_with_gemini(items)
-                    results.append({"filename":label,"bill":bill,"items":items,
-                                    "raw_text":text,"gdrive_raw":gdrive_raw,
-                                    "image":img_to_bytes_png(crop)})
+                        bill  = extract_receipt(text)
+                        items = extract_items_cj(text)
+                    results.append({"filename": label, "bill": bill, "items": items,
+                                    "raw_text": text, "gdrive_raw": gdrive_raw,
+                                    "image": img_to_bytes_png(crop)})
         except Exception as e:
-            results.append({"filename":fname,
-                            "bill":{"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
-                                    "total_amount":0.0,"cash":0.0,"change":0.0,
-                                    "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
-                            "items":[],"raw_text":f"[ERROR] {e}","image":None})
+            results.append({"filename": fname,
+                            "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
+                                     "total_amount":0.0,"cash":0.0,"change":0.0,
+                                     "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
+                            "items": [], "raw_text": f"[ERROR] {e}", "image": None})
     return results
+
 
 def run_batch_mode_ui():
     st.markdown(f'<p class="sec-header">{t("upload_label")}</p>', unsafe_allow_html=True)
     st.markdown(f'<div class="hint-box">{t("batch_upload_hint")}</div>', unsafe_allow_html=True)
-    uploaded = st.file_uploader("batch_files", type=["png","jpg","jpeg","heic"],
+    uploaded = st.file_uploader(
+        "batch_files", type=["png","jpg","jpeg","heic"],
         accept_multiple_files=True, label_visibility="collapsed", key="batch_uploader")
     if uploaded:
         new_files = [(f.name, f.read()) for f in uploaded]
-        names_new = [x[0] for x in new_files]; names_old = [x[0] for x in S.batch_files]
-        if names_new != names_old: S.batch_files = new_files; S.all_bills = []
-    if not S.batch_files: st.info("👆 เลือกไฟล์ภาพทั้งหมดที่ต้องการวิเคราะห์"); return
+        names_new = [x[0] for x in new_files]
+        names_old = [x[0] for x in S.batch_files]
+        if names_new != names_old:
+            S.batch_files = new_files
+            S.all_bills = []
+    if not S.batch_files:
+        st.info("👆 เลือกไฟล์ภาพทั้งหมดที่ต้องการวิเคราะห์")
+        return
     st.success(t("batch_found")(len(S.batch_files)))
     cols_per_row = 6
     for chunk_start in range(0, len(S.batch_files), cols_per_row):
         chunk = S.batch_files[chunk_start:chunk_start+cols_per_row]
-        cols = st.columns(len(chunk))
+        cols  = st.columns(len(chunk))
         for ci, (fname, fbytes) in enumerate(chunk):
             with cols[ci]:
-                try: st.image(Image.open(io.BytesIO(fbytes)), use_container_width=True,
-                              caption=fname[:16]+('…' if len(fname)>16 else ''))
-                except Exception: st.warning(fname[:16])
+                try:
+                    st.image(Image.open(io.BytesIO(fbytes)), use_container_width=True,
+                              caption=fname[:16] + ('…' if len(fname)>16 else ''))
+                except Exception:
+                    st.warning(fname[:16])
     st.divider()
-    auto_detect = st.checkbox("🪄 ตรวจจับหลายใบเสร็จในภาพเดียวอัตโนมัติ", value=False, key="batch_auto_detect")
+    auto_detect = st.checkbox(
+        "🪄 ตรวจจับหลายใบเสร็จในภาพเดียวอัตโนมัติ + ทำพื้นหลังขาว",
+        value=False, key="batch_auto_detect")
     bc1, bc2 = st.columns([3,1])
-    with bc1: run_clicked = st.button(t("batch_analyze"), use_container_width=True, type="primary")
+    with bc1:
+        run_clicked = st.button(t("batch_analyze"), use_container_width=True, type="primary")
     with bc2:
         if st.button(t("reset"), use_container_width=True, key="batch_reset"):
             for k, v in _DEFAULTS.items(): S[k] = v
-            S.bill_count = -1; st.rerun()
+            S.bill_count = -1
+            st.rerun()
     if run_clicked:
         progress_bar = st.progress(0, text=t("batch_progress")(0, len(S.batch_files), ""))
-        def _cb(i, n, fname): progress_bar.progress(i/n, text=t("batch_progress")(i,n,fname))
+        def _cb(i, n, fname):
+            progress_bar.progress(i / n, text=t("batch_progress")(i, n, fname))
         results = run_batch_analysis(S.batch_files, progress_cb=_cb,
                                       auto_detect_multi=auto_detect, ocr_engine=S.ocr_engine)
         progress_bar.progress(1.0, text=t("batch_done")(len(results)))
-        S.all_bills = results; st.rerun()
+        S.all_bills = results
+        st.rerun()
     if S.all_bills:
-        st.divider(); st.success(t("found")(len(S.all_bills)))
-        # ── สรุปประเภทรวมทุกบิล ──
-        all_items_flat = [it for b in S.all_bills for it in (b['items'] or [])]
-        if all_items_flat and any("ประเภทสินค้า" in it for it in all_items_flat):
-            with st.expander("📊 สรุปประเภทสินค้ารวมทุกบิล", expanded=True):
-                render_category_summary(all_items_flat)
         st.divider()
+        st.success(t("found")(len(S.all_bills)))
         for idx, b in enumerate(S.all_bills):
             with st.expander(f"📄 {b['filename']}", expanded=False):
                 ic, dc = st.columns([1,2])
                 with ic:
                     if b.get('image'): st.image(b['image'], use_container_width=True)
                 with dc:
-                    d = b['bill']; st.markdown("**ตรวจสอบ / แก้ไข**")
+                    d = b['bill']
+                    st.markdown("**ตรวจสอบ / แก้ไข**")
                     r1 = st.columns(4)
                     d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"bdt{idx}")
                     d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"btm{idx}")
@@ -1487,21 +2125,24 @@ def run_batch_mode_ui():
                 mc[1].metric("💵 เงินสด",  f"{d['cash']:.2f} ฿")
                 mc[2].metric("🔄 เงินทอน", f"{d['change']:.2f} ฿")
                 if b['items']:
-                    st.markdown("**🛒 รายการสินค้า (พร้อมประเภท)**")
-                    df_items = pd.DataFrame(b['items'])
-                    if "ประเภทสินค้า" in df_items.columns:
-                        df_items["ประเภทสินค้า"] = df_items["ประเภทสินค้า"].apply(
-                            lambda x: f"{CATEGORY_EMOJI.get(x,'📦')} {x}")
-                    st.dataframe(df_items, use_container_width=True, hide_index=True)
-                    render_category_summary(b['items'])
+                    st.markdown("**🛒 รายการสินค้า**")
+                    st.dataframe(pd.DataFrame(b['items']), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):
-                    gdrive_raw_b = b.get("gdrive_raw","")
+                    gdrive_raw_b = b.get("gdrive_raw", "")
                     if S.ocr_engine == "gdrive" and gdrive_raw_b:
                         st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
-                        st.text_area("Google Doc raw", gdrive_raw_b, height=200, key=f"bgdraw{idx}", disabled=True)
-                        st.markdown("---"); st.markdown("**🧹 หลัง clean_text**")
+                        st.text_area(
+                            "Google Doc raw",
+                            gdrive_raw_b,
+                            height=200,
+                            key=f"bgdraw{idx}",
+                            disabled=True,
+                            help="นี่คือข้อความที่ Google Drive อ่านได้ก่อนที่แอปจะแก้ไข/จัดรูปแบบ"
+                        )
+                        st.markdown("---")
+                        st.markdown("**🧹 หลัง clean_text (ส่งให้ parser)**")
                     st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160, key=f"braw{idx}", disabled=True)
                     st.json({k:v for k,v in b['bill'].items()})
         st.divider()
@@ -1510,61 +2151,130 @@ def run_batch_mode_ui():
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN UI
+# ─────────────────────────────────────────────────────────────────────────────
 def main():
+    # ── จับ OAuth callback ก่อนเรนเดอร์ทุกอย่าง ──
+    # Google redirect กลับมาพร้อม ?code=... ใน URL
+    # ต้องจับตรงนี้เพราะ Streamlit rerun ทุกครั้งที่ query params เปลี่ยน
     _qp = st.query_params
     if "code" in _qp and "gdrive_token" not in st.session_state:
-        _code = _qp["code"]; _state_received = _qp.get("state","")
-        _state_expected = st.session_state.get("gdrive_oauth_state","")
+        _code            = _qp["code"]
+        _state_received  = _qp.get("state", "")
+        _state_expected  = st.session_state.get("gdrive_oauth_state", "")
+        # Streamlit Cloud rerun ทำให้ session หาย → ถ้าไม่มี state ที่บันทึกไว้
+        # (session ถูก reset) ให้ยอมรับ code ไปก่อนเลย ปลอดภัยพอสำหรับใช้งานภายใน
         _state_ok = (not _state_expected) or (_state_received == _state_expected)
         if _state_ok:
             with st.spinner("🔐 กำลัง Login Google Drive..."):
                 _ok = gdrive_exchange_code(_code)
             st.query_params.clear()
-            if _ok: st.success("✅ Login สำเร็จ! พร้อมใช้ Google Drive OCR"); st.rerun()
+            if _ok:
+                st.success("✅ Login สำเร็จ! พร้อมใช้ Google Drive OCR")
+                st.rerun()
             else:
-                _err = st.session_state.pop("gdrive_auth_error","unknown")
+                _err = st.session_state.pop("gdrive_auth_error", "unknown")
                 st.error(f"Login ไม่สำเร็จ: {_err}")
         else:
-            st.query_params.clear(); st.warning("OAuth state ไม่ตรง — กรุณาลอง Login ใหม่")
+            st.query_params.clear()
+            st.warning("OAuth state ไม่ตรง — กรุณาลอง Login ใหม่")
 
     col_t, col_l = st.columns([5,1])
     with col_t: st.markdown(f"## {t('title')}")
     with col_l:
-        lc = st.radio("", ["ไทย","EN"], horizontal=True, label_visibility="collapsed",
+        lc = st.radio("", ["ไทย","EN"], horizontal=True,
+                      label_visibility="collapsed",
                       index=0 if S.lang=="th" else 1)
         nl = "th" if lc=="ไทย" else "en"
         if nl != S.lang: S.lang = nl; st.rerun()
 
+    # ── เลือก OCR Engine ──────────────────────────────────────────────────
     with st.expander("⚙️ ตัวเลือก OCR Engine", expanded=False):
-        if "_gdrive_warning" in S: st.warning(f"⚠️ Google Drive OCR error: {S._gdrive_warning}"); del S["_gdrive_warning"]
-        if "_vision_api_warning" in S: st.warning(f"⚠️ Google Vision API error: {S._vision_api_warning}"); del S["_vision_api_warning"]
-        gdrive_ready = is_gdrive_configured(); vision_ready = is_vision_api_configured()
+
+        # แสดง warning ถ้า engine ก่อนหน้า fail
+        if "_gdrive_warning" in S:
+            st.warning(f"⚠️ Google Drive OCR error (fallback → Tesseract): {S._gdrive_warning}")
+            del S["_gdrive_warning"]
+        if "_vision_api_warning" in S:
+            st.warning(f"⚠️ Google Vision API error (fallback → Tesseract): {S._vision_api_warning}")
+            del S["_vision_api_warning"]
+
+        gdrive_ready  = is_gdrive_configured()
+        vision_ready  = is_vision_api_configured()
+
         engine_options = [
             "🆓 Tesseract (ฟรี, รันในเครื่อง)",
             f"📄 Google Drive OCR {'✅' if is_gdrive_token_ready() else ('🔑 ต้อง Login' if gdrive_ready else '⚙️ ต้องตั้งค่า')} (ฟรี ไม่จำกัด)",
             f"🎯 Google Cloud Vision API {'✅' if vision_ready else '⚙️ ต้องตั้งค่า'} (แม่นสุด)",
         ]
-        engine_map = ["tesseract","gdrive","vision"]
+        engine_map = ["tesseract", "gdrive", "vision"]
         current_idx = engine_map.index(S.ocr_engine) if S.ocr_engine in engine_map else 0
-        choice = st.radio("เลือก OCR Engine", engine_options, index=current_idx, label_visibility="collapsed")
+        choice = st.radio(
+            "เลือก OCR Engine", engine_options,
+            index=current_idx, key="ocr_engine_radio",
+            label_visibility="collapsed",
+        )
         new_engine = engine_map[engine_options.index(choice)]
-        if new_engine != S.ocr_engine: S.ocr_engine = new_engine
-        if S.ocr_engine == "gdrive": render_gdrive_login_ui()
+        if new_engine != S.ocr_engine:
+            S.ocr_engine = new_engine
+
+        # ── รายละเอียดแต่ละ engine ──
+        if S.ocr_engine == "gdrive":
+            render_gdrive_login_ui()
+
         elif S.ocr_engine == "vision":
-            if vision_ready: st.success("✅ ตั้งค่า Google Vision API key แล้ว")
-            else: st.warning("⚠️ ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
-        else:
-            st.caption("💡 Tesseract ฟรีและรันในเครื่องทั้งหมด แต่แม่นน้อยกว่า")
+            if vision_ready:
+                st.success(
+                    "✅ ตั้งค่า Google Vision API key แล้ว — พร้อมใช้งาน\n"
+                    "(ฟรี 1,000 ภาพแรกของทุกเดือน เกินจากนั้นมีค่าใช้จ่ายเล็กน้อย)"
+                )
+            else:
+                st.warning(
+                    "⚠️ ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY — ระบบจะใช้ Tesseract แทน\n\n"
+                    "ตั้งค่า env var `GOOGLE_VISION_API_KEY` ก่อนรันแอป"
+                )
+
+        else:  # tesseract
+            st.caption(
+                "💡 Tesseract ฟรีและรันในเครื่องทั้งหมด แต่แม่นน้อยกว่า\n"
+                "ลองสลับไปใช้ **Google Drive OCR** (ฟรี ไม่จำกัด) หรือ "
+                "**Google Vision API** ถ้าผลยังไม่แม่นพอ"
+            )
+
+        # ── Gemini API status — แสดงสำหรับทุก engine ──
         gemini_ready = is_gemini_configured()
         st.divider()
-        st.markdown("**✨ Gemini API — วิเคราะห์บิล + จัดประเภทสินค้าอัตโนมัติ 7 หมวด**")
+        st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text (ใช้กับทุก OCR Engine)**")
         if gemini_ready:
-            st.success("✅ ตั้งค่า Gemini API key แล้ว — จะจัดประเภทสินค้าอัตโนมัติหลัง OCR\n\nฟรี 1,500 requests/วัน (Gemini 2.0 Flash)")
+            st.success(
+                "✅ ตั้งค่า Gemini API key แล้ว\n\n"
+                "ทุก OCR engine จะส่ง text ให้ Gemini วิเคราะห์รายการสินค้า+ยอดเงินอัตโนมัติ\n"
+                "ฟรี 1,500 requests/วัน (Gemini 2.0 Flash)"
+            )
         else:
-            st.info("💡 เพิ่ม GEMINI_API_KEY ใน Secrets เพื่อวิเคราะห์บิลและจัดประเภทสินค้าอัตโนมัติ\n\n1. https://aistudio.google.com/app/apikey → Create API key\n2. ใส่ใน secrets.toml: `GEMINI_API_KEY = \"AIzaSy...\"`")
-        with st.expander("📊 เปรียบเทียบ OCR Engine"):
-            st.markdown("""| Engine | ค่าใช้จ่าย | ความแม่น | Speed |\n|--------|-----------|---------|-------|\n| 🆓 Tesseract | ฟรี | ⭐⭐ | ⚡⚡⚡ |\n| 📄 **Drive OCR + Gemini** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | ⚡⚡ |\n| 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ⚡⚡ |""")
+            st.info(
+                "💡 เพิ่ม Gemini API เพื่อวิเคราะห์บิลแม่นขึ้น (ฟรี 1,500 requests/วัน)\n\n"
+                "1. ไปที่ https://aistudio.google.com/app/apikey → **Create API key**\n"
+                "2. ใส่ใน `.streamlit/secrets.toml`:\n"
+                "```toml\n"
+                'GEMINI_API_KEY = "AIzaSy..."\n'
+                "```\n"
+                "ถ้าไม่ตั้งค่า แอปจะใช้ regex parser แทน (แม่นน้อยกว่า)"
+            )
 
+        # ── ตาราง comparison ──
+        with st.expander("📊 เปรียบเทียบ OCR Engine ทั้ง 3 แบบ"):
+            st.markdown("""
+| Engine | ค่าใช้จ่าย | ความแม่น | ภาษาไทย | Login | Speed |
+|--------|-----------|---------|---------|-------|-------|
+| 🆓 Tesseract | ฟรี | ⭐⭐ | พอใช้ | ❌ ไม่ต้อง | ⚡⚡⚡ |
+| 📄 **Drive OCR + Gemini** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | **ดีมาก** | ✅ Login + API Key | ⚡⚡ |
+| 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ดีมาก | ✅ API Key | ⚡⚡ |
+""")
+
+    # ── เลือกโหมด ──
     st.markdown(f'<p class="sec-header">{t("mode_label")}</p>', unsafe_allow_html=True)
     m1, m2 = st.columns(2)
     is_single = S.bill_count != -1
@@ -1582,61 +2292,83 @@ def main():
                      type="primary" if is_batch else "secondary"):
             if not is_batch:
                 for k, v in _DEFAULTS.items(): S[k] = v
-                S.bill_count = -1; st.rerun()
+                S.bill_count = -1
+                st.rerun()
     st.divider()
 
+    # ── BATCH MODE ──
     if S.bill_count == -1:
-        run_batch_mode_ui(); return
+        run_batch_mode_ui()
+        return
 
     render_steps()
-    st.markdown(f'<p class="sec-header" style="margin-top:1rem">{t("count_label")}</p>', unsafe_allow_html=True)
+
+    # ── STEP 1 ──
+    st.markdown(f'<p class="sec-header" style="margin-top:1rem">{t("count_label")}</p>',
+                unsafe_allow_html=True)
     cc1, cc2, cc3 = st.columns(3)
     for n, col in [(1,cc1),(2,cc2),(3,cc3)]:
         with col:
             is_on = S.bill_count == n
-            if st.button(f"{'✅ ' if is_on else ''}{t(f'b{n}')}\n_{t(f'b{n}s')}_",
-                         use_container_width=True, key=f"cnt{n}",
-                         type="primary" if is_on else "secondary"):
+            if st.button(
+                f"{'✅ ' if is_on else ''}{t(f'b{n}')}\n_{t(f'b{n}s')}_",
+                use_container_width=True, key=f"cnt{n}",
+                type="primary" if is_on else "secondary"):
                 S.bill_count=n; S.step=2
                 S.gallery_files=[]; S.selected_idx=-1
-                S.crop_result=None; S.all_bills=[]; S.manual_splits_px=None; S.crop_applied=False
+                S.crop_result=None; S.all_bills=[]
+                S.manual_splits_px=None; S.crop_applied=False
                 st.rerun()
-    if S.bill_count == 0: st.info("👆 กรุณาเลือกจำนวนบิลก่อน"); return
+    if S.bill_count == 0:
+        st.info("👆 กรุณาเลือกจำนวนบิลก่อน")
+        return
     st.divider()
 
+    # ── STEP 2 ──
     st.markdown(f'<p class="sec-header">{t("upload_label")}</p>', unsafe_allow_html=True)
     st.markdown(f'<div class="hint-box">{t("upload_hint")}</div>', unsafe_allow_html=True)
-    uploaded = st.file_uploader("files", type=["png","jpg","jpeg","heic"],
+    uploaded = st.file_uploader(
+        "files", type=["png","jpg","jpeg","heic"],
         accept_multiple_files=True, label_visibility="collapsed", key="uploader")
     if uploaded:
         new_files = [(f.name, f.read()) for f in uploaded]
-        names_new = [x[0] for x in new_files]; names_old = [x[0] for x in S.gallery_files]
+        names_new = [x[0] for x in new_files]
+        names_old = [x[0] for x in S.gallery_files]
         if names_new != names_old:
-            S.gallery_files=new_files; S.selected_idx=-1; S.crop_result=None; S.step=2
+            S.gallery_files=new_files; S.selected_idx=-1
+            S.crop_result=None; S.step=2
             S.manual_splits_px=None; S.crop_applied=False
 
     if S.gallery_files:
         st.markdown(f'<p class="sec-header">{t("gallery_label")}</p>', unsafe_allow_html=True)
         st.caption(t("gallery_count")(len(S.gallery_files)))
         cols_per_row = 5
-        for chunk_start in range(0, len(S.gallery_files), cols_per_row):
-            chunk = S.gallery_files[chunk_start:chunk_start+cols_per_row]
-            cols = st.columns(len(chunk))
+        all_f = S.gallery_files
+        for chunk_start in range(0, len(all_f), cols_per_row):
+            chunk = all_f[chunk_start:chunk_start+cols_per_row]
+            cols  = st.columns(len(chunk))
             for ci, (fname, fbytes) in enumerate(chunk):
                 idx = chunk_start + ci
                 with cols[ci]:
                     try:
-                        pil = Image.open(io.BytesIO(fbytes)); st.image(pil, use_container_width=True)
+                        pil = Image.open(io.BytesIO(fbytes))
+                        st.image(pil, use_container_width=True)
                         is_sel = S.selected_idx == idx
-                        label = f"{'✅ ' if is_sel else ''}{fname[:14]}{'…' if len(fname)>14 else ''}"
+                        label  = f"{'✅ ' if is_sel else ''}{fname[:14]}{'…' if len(fname)>14 else ''}"
                         if st.button(label, key=f"gal_{idx}", use_container_width=True,
                                      type="primary" if is_sel else "secondary"):
                             S.selected_idx=idx; S.crop_result=None; S.step=3
-                            S.manual_splits_px=None; S.crop_applied=False; st.rerun()
-                    except Exception: st.warning(fname)
-        if S.selected_idx < 0 and len(S.gallery_files) == 1: S.selected_idx = 0
-        if S.selected_idx >= 0: st.success(f"✅ เลือก: **{S.gallery_files[S.selected_idx][0]}**")
+                            S.manual_splits_px=None; S.crop_applied=False
+                            st.rerun()
+                    except Exception:
+                        st.warning(fname)
+        if S.selected_idx < 0 and len(S.gallery_files) == 1:
+            S.selected_idx = 0
+        if S.selected_idx >= 0:
+            fname = S.gallery_files[S.selected_idx][0]
+            st.success(f"✅ เลือก: **{fname}**")
 
+    # ── STEP 3 ──
     active_bytes = None
     if 0 <= S.selected_idx < len(S.gallery_files):
         active_bytes = S.gallery_files[S.selected_idx][1]
@@ -1644,8 +2376,11 @@ def main():
     if active_bytes:
         st.divider()
         st.markdown(f'<p class="sec-header">{t("crop_label")}</p>', unsafe_allow_html=True)
-        try: pil_orig = Image.open(io.BytesIO(active_bytes)).convert("RGB")
-        except Exception as e: st.error(f"ไม่สามารถโหลดรูป: {e}"); return
+        try:
+            pil_orig = Image.open(io.BytesIO(active_bytes)).convert("RGB")
+        except Exception as e:
+            st.error(f"ไม่สามารถโหลดรูป: {e}"); return
+
         crop_col, ctrl_col = st.columns([3,1])
         with ctrl_col:
             mode_choice = st.radio("โหมด Crop", [t("crop_free"), t("crop_a4")], key="crop_mode_r")
@@ -1654,30 +2389,42 @@ def main():
         with crop_col:
             st_html(crop_component_html(pil_orig, mode_key, bill_count=S.bill_count),
                     height=620 if S.bill_count > 1 else 580, scrolling=False)
+
         st.markdown("**📋 วางข้อมูล Crop ที่คัดลอกจากด้านบน:**")
         paste_col, btn_col = st.columns([4,1])
-        crop_json_str = paste_col.text_input("JSON ข้อมูล Crop", value="", key="crop_json_input",
+        crop_json_str = paste_col.text_input(
+            "JSON ข้อมูล Crop", value="", key="crop_json_input",
             label_visibility="collapsed",
             placeholder='วาง {"x":0,"y":0,"w":800,"h":600,"splits":[300,560]} ที่นี่')
-        w0, h0 = pil_orig.size; cx, cy, cw, ch, parsed_splits = 0, 0, w0, h0, []
+
+        w0, h0 = pil_orig.size
+        cx, cy, cw, ch, parsed_splits = 0, 0, w0, h0, []
         if crop_json_str.strip():
             try:
                 data = json.loads(crop_json_str.strip())
-                cx=int(data.get("x",0)); cy=int(data.get("y",0))
-                cw=int(data.get("w",w0)); ch=int(data.get("h",h0))
-                parsed_splits = [int(p) for p in data.get("splits",[])]
-            except Exception: st.warning("⚠️ รูปแบบข้อมูลไม่ถูกต้อง")
+                cx = int(data.get("x", 0)); cy = int(data.get("y", 0))
+                cw = int(data.get("w", w0)); ch = int(data.get("h", h0))
+                parsed_splits = [int(p) for p in data.get("splits", [])]
+            except Exception:
+                st.warning("⚠️ รูปแบบข้อมูลไม่ถูกต้อง")
+
         st.caption("หรือระบุพื้นที่ Crop ด้วยตัวเลขเอง:")
         mc = st.columns(4)
-        cx=mc[0].number_input("X (px)",0,w0,cx,key="cx"); cy=mc[1].number_input("Y (px)",0,h0,cy,key="cy")
-        cw=mc[2].number_input("W (px)",1,w0,cw if cw>0 else w0,key="cw")
-        ch=mc[3].number_input("H (px)",1,h0,ch if ch>0 else h0,key="ch")
+        cx = mc[0].number_input("X (px)", 0, w0, cx, key="cx")
+        cy = mc[1].number_input("Y (px)", 0, h0, cy, key="cy")
+        cw = mc[2].number_input("W (px)", 1, w0, cw if cw>0 else w0, key="cw")
+        ch = mc[3].number_input("H (px)", 1, h0, ch if ch>0 else h0, key="ch")
+
         if S.bill_count > 1:
             st.caption("จุดตัดบิล (พิกเซล X — คั่นด้วยจุลภาค):")
             default_splits_str = ", ".join(str(p) for p in parsed_splits) if parsed_splits else ""
-            splits_str = st.text_input("จุดตัดบิล", value=default_splits_str, key="splits_input",
-                label_visibility="collapsed", placeholder="เช่น 300, 560  (เว้นว่าง = ให้ระบบเดาเอง)")
-        else: splits_str = ""
+            splits_str = st.text_input(
+                "จุดตัดบิล", value=default_splits_str, key="splits_input",
+                label_visibility="collapsed",
+                placeholder="เช่น 300, 560  (เว้นว่าง = ให้ระบบเดาเอง)")
+        else:
+            splits_str = ""
+
         bc1, bc2 = st.columns(2)
         with bc1:
             if st.button(t("crop_confirm"), use_container_width=True, type="primary"):
@@ -1685,16 +2432,23 @@ def main():
                 S.crop_applied = True
                 manual_splits = []
                 if splits_str.strip():
-                    try: manual_splits = [int(x.strip())-cx for x in splits_str.split(",") if x.strip()]
-                    except Exception: pass
+                    try:
+                        manual_splits = [int(x.strip()) - cx for x in splits_str.split(",") if x.strip()]
+                        manual_splits = [p for p in manual_splits if 0 < p < cw]
+                    except Exception:
+                        manual_splits = []
                 elif parsed_splits:
-                    manual_splits = [p-cx for p in parsed_splits if 0<(p-cx)<cw]
+                    manual_splits = [p - cx for p in parsed_splits if 0 < (p - cx) < cw]
                 S.manual_splits_px = manual_splits if manual_splits else None
                 S.step=4; st.rerun()
         with bc2:
             if st.button(t("crop_skip"), use_container_width=True):
-                S.crop_result=pil_orig; S.crop_applied=False; S.manual_splits_px=None; S.step=4; st.rerun()
+                S.crop_result = pil_orig
+                S.crop_applied = False
+                S.manual_splits_px = None
+                S.step=4; st.rerun()
 
+    # ── STEP 4 ──
     working_pil = S.crop_result
     if working_pil is None and active_bytes and S.step == 4:
         working_pil = Image.open(io.BytesIO(active_bytes)).convert("RGB")
@@ -1702,19 +2456,28 @@ def main():
     if working_pil:
         st.divider()
         prev_c, ocr_c = st.columns([1,2])
-        with prev_c: st.image(working_pil, caption="รูปที่จะวิเคราะห์", use_container_width=True)
+        with prev_c:
+            st.image(working_pil, caption="รูปที่จะวิเคราะห์", use_container_width=True)
         with ocr_c:
-            engine_label = {"tesseract":"🆓 Tesseract","gdrive":"📄 Google Drive OCR","vision":"🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
+            # แสดง engine ที่กำลังใช้
+            engine_label = {
+                "tesseract": "🆓 Tesseract",
+                "gdrive":    "📄 Google Drive OCR",
+                "vision":    "🎯 Google Vision API",
+            }.get(S.ocr_engine, S.ocr_engine)
             st.caption(f"OCR Engine: **{engine_label}**")
-            if is_gemini_configured():
-                st.caption("✨ Gemini: จะจัดประเภทสินค้าอัตโนมัติหลัง OCR")
+
             if st.button(t("analyze"), use_container_width=True, type="primary"):
                 with st.spinner("กำลัง OCR..."):
                     img_cv = pil_to_cv(working_pil)
-                    if S.bill_count == 1: crops = [img_cv]
-                    elif S.manual_splits_px: crops = split_by_positions(img_cv, S.manual_splits_px)
-                    else: crops = split_receipts_image(img_cv, n_expected=S.bill_count)
-                    if len(crops) < S.bill_count: crops = crops + [img_cv] * (S.bill_count - len(crops))
+                    if S.bill_count == 1:
+                        crops = [img_cv]
+                    elif S.manual_splits_px:
+                        crops = split_by_positions(img_cv, S.manual_splits_px)
+                    else:
+                        crops = split_receipts_image(img_cv, n_expected=S.bill_count)
+                    if len(crops) < S.bill_count:
+                        crops = crops + [img_cv] * (S.bill_count - len(crops))
                     crops = crops[:S.bill_count]
                     all_bills = []
                     fname = (S.gallery_files[S.selected_idx][0]
@@ -1722,48 +2485,62 @@ def main():
                     progress = st.progress(0, text="เริ่มต้น OCR...")
                     for ci, crop in enumerate(crops):
                         label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
-                        progress.progress((ci)/len(crops),
+                        progress.progress(
+                            (ci) / len(crops),
                             text=f"📤 กำลังส่ง Google Drive OCR: บิล {ci+1}/{len(crops)}..."
-                                 if S.ocr_engine=="gdrive"
-                                 else f"🔍 OCR บิล {ci+1}/{len(crops)}...")
+                                 if S.ocr_engine == "gdrive"
+                                 else f"🔍 OCR บิล {ci+1}/{len(crops)}..."
+                        )
+                        # reset list ก่อนแต่ละบิล เพื่อให้จับ raw text ของบิลนี้
                         st.session_state["_gdrive_raw_texts"] = []
-                        text = run_ocr(crop, engine=S.ocr_engine)
+                        text       = run_ocr(crop, engine=S.ocr_engine)
                         gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                        text_for_gemini = gdrive_raw if (S.ocr_engine=="gdrive" and gdrive_raw) else text
+
+                        # ── ดึงข้อมูลบิล ──
+                        # ถ้ามี Gemini key → ส่ง text ให้ Gemini วิเคราะห์เสมอ
+                        # (ไม่ว่าจะใช้ OCR engine ไหน)
+                        # Gemini จะได้ raw text ที่สะอาดที่สุดเท่าที่มี:
+                        # - gdrive: ใช้ raw text จาก Google Doc (สะอาดสุด)
+                        # - tesseract/vision: ใช้ cleaned text แทน
+                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+
                         if is_gemini_configured() and text_for_gemini.strip():
-                            progress.progress((ci+0.4)/len(crops), text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
-                            gemini_result = extract_with_gemini(text_for_gemini,
-                                ocr_source="gdrive" if S.ocr_engine=="gdrive" else "tesseract")
+                            progress.progress(
+                                (ci + 0.5) / len(crops),
+                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}..."
+                            )
+                            gemini_result = extract_with_gemini(
+                                text_for_gemini,
+                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract"
+                            )
                             if gemini_result["ok"] and gemini_result["items"]:
-                                bill = gemini_result["bill"]; items = gemini_result["items"]
+                                bill  = gemini_result["bill"]
+                                items = gemini_result["items"]
                             else:
-                                bill = extract_receipt(text); items = extract_items_cj(text)
-                            # ── จัดประเภทสินค้า ──
-                            if items:
-                                progress.progress((ci+0.7)/len(crops), text=f"🏷️ จัดประเภทสินค้าบิล {ci+1}/{len(crops)}...")
-                                items = classify_items_with_gemini(items)
+                                # Gemini ไม่ได้ผล → fallback regex
+                                bill  = extract_receipt(text)
+                                items = extract_items_cj(text)
                         else:
-                            bill = extract_receipt(text); items = extract_items_cj(text)
+                            bill  = extract_receipt(text)
+                            items = extract_items_cj(text)
                         all_bills.append({"filename":label,"bill":bill,"items":items,
                                           "raw_text":text,"gdrive_raw":gdrive_raw,
                                           "image":img_to_bytes_png(crop)})
                     progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
                     S.all_bills = all_bills; S.step=4; st.rerun()
 
+    # ── RESULTS ──
+    # ── RESULTS ──
     if S.all_bills:
         st.success(t("found")(len(S.all_bills)))
-        # ── สรุปประเภทรวมทุกบิล ──
-        all_items_flat = [it for b in S.all_bills for it in (b['items'] or [])]
-        if all_items_flat and any("ประเภทสินค้า" in it for it in all_items_flat):
-            with st.expander("📊 สรุปประเภทสินค้ารวมทุกบิล", expanded=True):
-                render_category_summary(all_items_flat)
         for idx, b in enumerate(S.all_bills):
             with st.expander(f"📄 {b['filename']}", expanded=True):
                 ic, dc = st.columns([1,2])
                 with ic:
                     if b.get('image'): st.image(b['image'], use_container_width=True)
                 with dc:
-                    d = b['bill']; st.markdown("**ตรวจสอบ / แก้ไข**")
+                    d = b['bill']
+                    st.markdown("**ตรวจสอบ / แก้ไข**")
                     r1 = st.columns(4)
                     d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"dt{idx}")
                     d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
@@ -1773,21 +2550,24 @@ def main():
                     d['total_amount'] = parse_price(tot_str)
                 st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
                 if b['items']:
-                    st.markdown("**🛒 รายการสินค้า (พร้อมประเภท)**")
-                    df_items = pd.DataFrame(b['items'])
-                    if "ประเภทสินค้า" in df_items.columns:
-                        df_items["ประเภทสินค้า"] = df_items["ประเภทสินค้า"].apply(
-                            lambda x: f"{CATEGORY_EMOJI.get(x,'📦')} {x}")
-                    st.dataframe(df_items, use_container_width=True, hide_index=True)
-                    render_category_summary(b['items'])
+                    st.markdown("**🛒 รายการสินค้า**")
+                    st.dataframe(pd.DataFrame(b['items']), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
                 with st.expander(f"🔬 {t('raw_text')} + debug"):
                     gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
                     if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
                         st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
-                        st.text_area("Google Doc raw", gdrive_raws[idx], height=200, key=f"gdraw{idx}", disabled=True)
-                        st.markdown("---"); st.markdown("**🧹 หลัง clean_text (ส่งให้ parser)**")
+                        st.text_area(
+                            "Google Doc raw",
+                            gdrive_raws[idx],
+                            height=200,
+                            key=f"gdraw{idx}",
+                            disabled=True,
+                            help="นี่คือข้อความที่ Google Drive อ่านได้ก่อนที่แอปจะแก้ไข/จัดรูปแบบ"
+                        )
+                        st.markdown("---")
+                        st.markdown("**🧹 หลัง clean_text (ส่งให้ parser)**")
                     st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160, key=f"raw{idx}", disabled=True)
                     st.json({k:v for k,v in b['bill'].items()})
         st.divider()
@@ -1799,8 +2579,7 @@ def main():
                                use_container_width=True)
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
-                for k, v in _DEFAULTS.items(): S[k] = v
+                for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
-
 if __name__ == "__main__":
     main()

@@ -1415,7 +1415,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
     # รองรับทั้ง "1 ชื่อ" และ "- ชื่อ" (dash แทน qty)
-    _item_start = re.compile(r'^(?:\d+|-)\s+\S')
+    _item_start = re.compile(r'^(?:\d+|-)\s*\S')
     _kw_amount  = re.compile(
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
@@ -1587,10 +1587,10 @@ def extract_items_cj(text: str) -> list:
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
     # รองรับ qty เป็นตัวเลขหรือ "-"
     _QTY    = r'(?:\d+|-)'
-    _full  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _full = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
     _fb_a  = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    _fb_b  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
-    _fb_c  = re.compile(r'^[\.]?\s*(' + _QTY + r')\s+(.+?)\s+(\d+[.,]\d{2})\s*$')
+    _fb_b = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
+    _fb_c = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s*$')
 
     for line in lines[start_idx:]:
         line = line.strip()

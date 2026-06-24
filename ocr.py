@@ -2789,6 +2789,7 @@ def main():
                             if gemini_result["ok"] and gemini_result["items"]:
                                 bill  = gemini_result["bill"]
                                 items = gemini_result["items"]
+                                items = identify_products_batch_with_search(items)
                             else:
                                 # Gemini ไม่ได้ผล → fallback regex
                                 bill  = extract_receipt(text)

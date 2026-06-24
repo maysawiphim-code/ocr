@@ -1015,10 +1015,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
         return {"bill": None, "items": [], "ok": False, "error": str(e)}
 
 
-def extract_items_with_gemini(raw_text: str) -> list:
-    """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
-    result = extract_with_gemini(raw_text)
-    return result.get("items", [])
+
 
 
 def categorize_items_batch(items: list) -> list:
@@ -1084,44 +1081,8 @@ def extract_items_with_gemini(raw_text: str) -> list:
     """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
     result = extract_with_gemini(raw_text)
     return result.get("items", [])
-def categorize_items_batch(items: list) -> list:
-    """ให้ Gemini จัดหมวดหมู่สินค้าทั้งหมดทีเดียว"""
-    if not items:
-        return []
-    names = [it.get("ชื่อสินค้า", "") for it in items]
-    if not is_gemini_configured():
-        return ["อื่นๆ"] * len(items)
-    try:
-        names_str = "\n".join(f"{i+1}. {n}" for i, n in enumerate(names))
-        prompt = f"""คุณคือผู้เชี่ยวชาญสินค้าในร้านสะดวกซื้อ CJ Express
-จัดหมวดหมู่สินค้าต่อไปนี้ให้ครบทุกรายการ:
 
-{names_str}
 
-หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 8 หมวดนี้เท่านั้น):
-1. อาหารพร้อมทานและเบเกอรี่
-2. อาหารกึ่งสำเร็จรูปและของทานเล่น
-3. เครื่องดื่ม
-4. ผลิตภัณฑ์นมและอาหารแช่แข็ง
-5. ของใช้ส่วนตัว
-6. ของใช้ในบ้านและเวชภัณฑ์
-7. บริการและสินค้าเบ็ดเตล็ด
-8. อื่นๆ
-
-กฎ:
-- ใช้ความรู้เกี่ยวกับสินค้าในร้านสะดวกซื้อไทยในการตัดสินใจ
-- ถ้าชื่อสินค้าไม่ชัดเจนให้เดาจากบริบท
-- ตอบเป็น JSON array เรียงตามลำดับเดิมเท่านั้น ไม่ต้องอธิบาย
-- ตัวอย่าง: ["เครื่องดื่ม","อาหารพร้อมทานและเบเกอรี่","ของใช้ส่วนตัว"]"""
-
-        result = _call_gemini(prompt, max_tokens=500).strip()
-        result = re.sub(r"```(?:json)?\s*|\s*```", "", result).strip()
-        cats = json.loads(result)
-        if isinstance(cats, list) and len(cats) == len(items):
-            return cats
-    except Exception:
-        pass
-    return ["อื่นๆ"] * len(items)
 
 def _collapse(text: str) -> str:
     return re.sub(r'\s+', '', text)
@@ -1773,15 +1734,17 @@ def build_excel(all_bills: list) -> bytes:
                     "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],
                     "เลขที่ใบเสร็จ":d['rcpt_no']}
             items = b['items'] or []
-            categories = categorize_items_batch(items)
-            for it, cat in zip(items, categories):
+            for it in items:
+                # ใช้หมวดหมู่ที่มีอยู่แล้ว — Bao override เสมอ
+                cat = BAO_CAFE_CATEGORY if _is_bao_item(it.get("ชื่อสินค้า","")) \
+                      else (it.get("หมวดหมู่") or "สินค้าเบ็ดเตล็ดอื่นๆ")
                 row = base.copy()
-                row.update({"ชื่อสินค้า":it.get('ชื่อสินค้า',''),
-                            "หมวดหมู่":cat,
-                            "จำนวน":it.get('จำนวน',1),
-                            "ราคาต่อหน่วย":it.get('ราคาต่อหน่วย',0),
-                            "ยอดรวมสินค้า":it.get('ยอดรวมสินค้า',0),
-                            "ยอดรวม":""})
+                row.update({"ชื่อสินค้า":   it.get('ชื่อสินค้า',''),
+                            "หมวดหมู่":     cat,
+                            "จำนวน":        it.get('จำนวน',1),
+                            "ราคาต่อหน่วย": it.get('ราคาต่อหน่วย',0),
+                            "ยอดรวมสินค้า": it.get('ยอดรวมสินค้า',0),
+                            "ยอดรวม":       ""})
                 rows.append(row)
             summary = base.copy()
             summary.update({"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":"",
@@ -2191,9 +2154,11 @@ def run_batch_mode_ui():
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
                     items_display = b['items'].copy()
-                    cats = categorize_items_batch(items_display)
-                    for i, cat in enumerate(cats):
-                        items_display[i] = {**items_display[i], "หมวดหมู่": cat}
+                    for i, it in enumerate(items_display):
+                        if _is_bao_item(it.get("ชื่อสินค้า", "")):
+                            items_display[i] = {**it, "หมวดหมู่": BAO_CAFE_CATEGORY}
+                        elif not it.get("หมวดหมู่"):
+                            items_display[i] = {**it, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}
                     st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
@@ -2625,9 +2590,11 @@ def main():
                 if b['items']:
                     st.markdown("**🛒 รายการสินค้า**")
                     items_display = b['items'].copy()
-                    cats = categorize_items_batch(items_display)
-                    for i, cat in enumerate(cats):
-                        items_display[i] = {**items_display[i], "หมวดหมู่": cat}
+                    for i, it in enumerate(items_display):
+                        if _is_bao_item(it.get("ชื่อสินค้า", "")):
+                            items_display[i] = {**it, "หมวดหมู่": BAO_CAFE_CATEGORY}
+                        elif not it.get("หมวดหมู่"):
+                            items_display[i] = {**it, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}
                     st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))

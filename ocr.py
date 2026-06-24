@@ -2278,16 +2278,9 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                         text_for_gemini,
                         ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract"
                     )
-                    if gemini_result["ok"] and gemini_result["items"]:
-                                bill  = gemini_result["bill"]
-                                items = gemini_result["items"]
-                                items = identify_products_batch_with_search(items)  # ← เพิ่มบรรทัดนี้
-                            else:
-                                bill  = extract_receipt(text)
-                                items = extract_items_cj(text)
                     bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                     items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
-                    items = identify_products_batch_with_search(items)  # ← Web Search
+                    items = identify_products_batch_with_search(items)
                 else:
                     bill  = extract_receipt(text)
                     items = extract_items_cj(text)
@@ -2308,7 +2301,7 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                         )
                         bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                         items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
-                        items = identify_products_batch_with_search(items)  # ← Web Search
+                        items = identify_products_batch_with_search(items)
                     else:
                         bill  = extract_receipt(text)
                         items = extract_items_cj(text)

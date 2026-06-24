@@ -1252,6 +1252,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
       "ราคาต่อหน่วย": 0.0,
       "ยอดรวมสินค้า": 0.0
     }}
+
   ]
 }}
 
@@ -1266,7 +1267,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - total_amount: ยอดรวมหลังหักส่วนลด — ในบิลนี้คือ 95.00
 - cash/change: เงินสด/เงินทอน
 - ถ้าหาข้อมูลไม่เจอให้ใส่ "" หรือ 0.0
-- จำนวนสินค้ารวม N รายการ ในบิล = ต้องได้ items ครบ N รายการ
+- จำนวนสินค้ารวม N รายการ ในบิล = ต้องได้ items ครบ N รายการ"""
 
     try:
         text_out = _call_gemini(prompt)

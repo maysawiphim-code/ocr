@@ -990,10 +990,12 @@ def identify_products_batch_with_search(items: list) -> list:
 
     try:
         result = _call_gemini_with_search(prompt, max_tokens=1000)
+        st.write("🔎 Gemini raw response:", result[:500])  # ← เพิ่ม debug
         result = re.sub(r"```(?:json)?\s*|\s*```", "", result).strip()
         m = re.search(r'\[.*\]', result, re.DOTALL)
         if m:
             parsed = json.loads(m.group(0))
+            st.write("✅ parsed:", parsed)  # ← เพิ่ม debug
             if isinstance(parsed, list) and len(parsed) == len(pending_names):
                 updated = [it.copy() for it in items]
                 for list_pos, original_idx in enumerate(pending_indices):

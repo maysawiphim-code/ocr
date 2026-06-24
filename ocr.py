@@ -2779,6 +2779,11 @@ def main():
                             if gemini_result["ok"] and gemini_result["items"]:
                                 bill  = gemini_result["bill"]
                                 items = gemini_result["items"]
+                                # ── DEBUG ──
+                                st.write("🔍 ก่อน identify:", [(it["ชื่อสินค้า"], it["หมวดหมู่"]) for it in items])
+                                items = identify_products_batch_with_search(items)
+                                st.write("✅ หลัง identify:", [(it["ชื่อสินค้า"], it["หมวดหมู่"]) for it in items])
+                                # ── END DEBUG ──
                                 items = identify_products_batch_with_search(items)
                             else:
                                 # Gemini ไม่ได้ผล → fallback regex

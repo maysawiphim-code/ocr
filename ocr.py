@@ -996,8 +996,11 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
         items = []
         for it in data.get("items", []):
             name = str(it.get("ชื่อสินค้า", ""))
-            # rule-based override: Bao ชนะ Gemini เสมอ
-            cat = BAO_CAFE_CATEGORY if _is_bao_item(name) else str(it.get("หมวดหมู่", "สินค้าเบ็ดเตล็ดอื่นๆ"))
+            # rule-based: Bao ชนะเสมอ ไม่ว่า Gemini จะตอบอะไร
+            if _is_bao_item(name):
+                cat = BAO_CAFE_CATEGORY
+            else:
+                cat = str(it.get("หมวดหมู่", "สินค้าเบ็ดเตล็ดอื่นๆ"))
             items.append({
                 "ชื่อสินค้า":    name,
                 "หมวดหมู่":     cat,
@@ -1852,7 +1855,7 @@ textarea#data-out{{width:100%;margin-top:8px;font-size:11px;font-family:monospac
 const IMG_W={orig_w}, IMG_H={orig_h}, A4={is_a4}, N_BILLS={n_bills_js};
 const SPLIT_FRACS = {split_js};
 const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
-const MAX_W = 660, MAX_H = 460;
+const MAX_W = 420, MAX_H = 300;
 let scaleX, scaleY;
 let sx, sy, ex, ey, drawing = false, hasCrop = false, cropRect = null;
 let splitLines = SPLIT_FRACS.map(f => ({{frac: f, dragging: false}}));
@@ -2459,7 +2462,7 @@ def main():
             st.info(t("crop_hint"))
         with crop_col:
             st_html(crop_component_html(pil_orig, mode_key, bill_count=S.bill_count),
-                    height=620 if S.bill_count > 1 else 580, scrolling=False)
+                height=440 if S.bill_count > 1 else 400, scrolling=False)
 
         st.markdown("**📋 วางข้อมูล Crop ที่คัดลอกจากด้านบน:**")
         paste_col, btn_col = st.columns([4,1])

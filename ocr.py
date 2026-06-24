@@ -637,6 +637,15 @@ def run_ocr_google_drive(crop_cv) -> str:
         # บังคับ decode เป็น UTF-8 เสมอ (Google Drive export ส่งมาเป็น UTF-8)
         # ถ้าไม่ระบุ requests จะเดา encoding เองและมักผิดสำหรับภาษาไทย
         raw_text = export_resp.content.decode("utf-8")
+        # ── deduplicate: Google Drive OCR บางครั้ง export ซ้ำ 2 รอบ ──
+        _sep_markers = ['________________', '________________', '\f', '\x0c']
+        for _sep in _sep_markers:
+            if _sep in raw_text:
+                _parts = [p for p in raw_text.split(_sep) if len(p.strip()) > 100]
+                if _parts:
+                    raw_text = _parts[0]
+                break
+
     finally:
         # ลบไฟล์ทันที
         try:
@@ -990,12 +999,10 @@ def identify_products_batch_with_search(items: list) -> list:
 
     try:
         result = _call_gemini_with_search(prompt, max_tokens=1000)
-        st.write("🔎 Gemini raw response:", result[:500])  # ← เพิ่ม debug
         result = re.sub(r"```(?:json)?\s*|\s*```", "", result).strip()
         m = re.search(r'\[.*\]', result, re.DOTALL)
         if m:
             parsed = json.loads(m.group(0))
-            st.write("✅ parsed:", parsed)  # ← เพิ่ม debug
             if isinstance(parsed, list) and len(parsed) == len(pending_names):
                 updated = [it.copy() for it in items]
                 for list_pos, original_idx in enumerate(pending_indices):
@@ -2273,6 +2280,7 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                     items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
                     items = identify_products_batch_with_search(items)
+
                 else:
                     bill  = extract_receipt(text)
                     items = extract_items_cj(text)
@@ -2781,19 +2789,14 @@ def main():
                             if gemini_result["ok"] and gemini_result["items"]:
                                 bill  = gemini_result["bill"]
                                 items = gemini_result["items"]
-                                # ── DEBUG ──
-                                st.write("🔍 ก่อน identify:", [(it["ชื่อสินค้า"], it["หมวดหมู่"]) for it in items])
-                                items = identify_products_batch_with_search(items)
-                                st.write("✅ หลัง identify:", [(it["ชื่อสินค้า"], it["หมวดหมู่"]) for it in items])
-                                # ── END DEBUG ──
                                 items = identify_products_batch_with_search(items)
                             else:
-                                # Gemini ไม่ได้ผล → fallback regex
                                 bill  = extract_receipt(text)
                                 items = extract_items_cj(text)
                         else:
                             bill  = extract_receipt(text)
                             items = extract_items_cj(text)
+                    
                         all_bills.append({"filename":label,"bill":bill,"items":items,
                                           "raw_text":text,"gdrive_raw":gdrive_raw,
                                           "image":img_to_bytes_png(crop)})

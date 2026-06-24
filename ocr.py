@@ -878,40 +878,55 @@ def is_gemini_configured() -> bool:
     return bool(_get_gemini_key().strip())
 
 def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
-    import requests as _req
+    import requests as _req, time
     key = _get_gemini_key()
     if not key:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
-    resp = _req.post(
-        f"{_GEMINI_API_URL}?key={key}",
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
-        },
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["candidates"][0]["content"]["parts"][0]["text"]
+    
+    for attempt in range(3):
+        resp = _req.post(
+            f"{_GEMINI_API_URL}?key={key}",
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
+            },
+            timeout=30,
+        )
+        if resp.status_code == 429:
+            time.sleep((attempt + 1) * 10)
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    
+    raise RuntimeError("Gemini rate limit — ลองใหม่อีกครั้ง")
 
 def _call_gemini_with_search(prompt: str, max_tokens: int = 2000) -> str:
-    import requests as _req
+    import requests as _req, time
     key = _get_gemini_key()
     if not key:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
-    resp = _req.post(
-        f"{_GEMINI_SEARCH_API_URL}?key={key}",
-        json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "tools": [{"google_search": {}}],
-            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
-        },
-        timeout=60,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    parts = data["candidates"][0]["content"].get("parts", [])
-    return "".join(p.get("text", "") for p in parts)
+    
+    for attempt in range(3):  # retry 3 ครั้ง
+        resp = _req.post(
+            f"{_GEMINI_SEARCH_API_URL}?key={key}",
+            json={
+                "contents": [{"parts": [{"text": prompt}]}],
+                "tools": [{"google_search": {}}],
+                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
+            },
+            timeout=60,
+        )
+        if resp.status_code == 429:
+            wait = (attempt + 1) * 10  # 10, 20, 30 วินาที
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        data = resp.json()
+        parts = data["candidates"][0]["content"].get("parts", [])
+        return "".join(p.get("text", "") for p in parts)
+    
+    raise RuntimeError("Gemini rate limit — ลองใหม่อีกครั้ง")
 
 
 def identify_product_with_search(raw_name: str) -> dict:

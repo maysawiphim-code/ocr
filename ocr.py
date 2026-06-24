@@ -638,13 +638,15 @@ def run_ocr_google_drive(crop_cv) -> str:
         # ถ้าไม่ระบุ requests จะเดา encoding เองและมักผิดสำหรับภาษาไทย
         raw_text = export_resp.content.decode("utf-8")
         # ── deduplicate: Google Drive OCR บางครั้ง export ซ้ำ 2 รอบ ──
-        _sep_markers = ['________________', '________________', '\f', '\x0c']
-        for _sep in _sep_markers:
-            if _sep in raw_text:
-                _parts = [p for p in raw_text.split(_sep) if len(p.strip()) > 100]
-                if _parts:
-                    raw_text = _parts[0]
-                break
+        # ── แก้ form feed: Google Drive ใช้ \f คั่นหน้า → รวมเป็นบรรทัดเดียว ──
+        raw_text = raw_text.replace('\f', '\n').replace('\x0c', '\n')
+
+        # ── deduplicate: ถ้า text ซ้ำ 2 รอบ ให้เอาแค่ครึ่งแรก ──
+        _lines = [l for l in raw_text.split('\n') if l.strip()]
+        _half = len(_lines) // 2
+        if _half > 5 and _lines[:_half] == _lines[_half:]:
+            raw_text = '\n'.join(_lines[:_half])
+                
 
     finally:
         # ลบไฟล์ทันที

@@ -2788,6 +2788,9 @@ def main():
                                 text_for_gemini,
                                 ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract"
                             )
+                            st.write("Gemini ok:", gemini_result["ok"])           # ← เพิ่ม
+                            st.write("Gemini error:", gemini_result.get("error")) # ← เพิ่ม
+                            st.write("items count:", len(gemini_result.get("items",[]))) # ← เพิ่ม
                             if gemini_result["ok"] and gemini_result["items"]:
                                 bill  = gemini_result["bill"]
                                 items = gemini_result["items"]

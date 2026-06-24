@@ -910,7 +910,7 @@ def identify_product_with_search(raw_name: str) -> dict:
     ให้ Gemini ค้นหาสินค้าจาก CJ Express จริง
     คืนค่า: {"name": "ชื่อที่ถูกต้อง", "category": "หมวดหมู่", "confidence": "high/low"}
     """
-     prompt = f"""ค้นหาและระบุสินค้าจากชื่อที่ OCR อ่านได้ (อาจผิดเพี้ยน)
+    prompt = f"""ค้นหาและระบุสินค้าจากชื่อที่ OCR อ่านได้ (อาจผิดเพี้ยน)
 
 ชื่อจาก OCR: "{raw_name}"
 

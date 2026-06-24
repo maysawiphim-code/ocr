@@ -1353,9 +1353,9 @@ def _find_pos_id(text: str, compact: str, lines: list) -> str:
     _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
     for line in lines[:12]:
         c = _collapse(line)
-        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(\d{4,5})', c, re.IGNORECASE)
+        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(0\d{4})', c, re.IGNORECASE)
         if m:
-            val = m.group(1).lstrip('0') or m.group(1)
+            return m.group(1)  # คืนค่าพร้อม 0 นำหน้า เช่น 00904
             return val
     for line in lines[:12]:
         c = _collapse(line)

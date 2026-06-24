@@ -857,9 +857,9 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+_GEMINI_SEARCH_API_URL = _GEMINI_API_URL
 
 def _get_gemini_key() -> str:
-    """อ่าน Gemini API key จาก secrets หรือ env"""
     try:
         return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
     except Exception:
@@ -869,7 +869,6 @@ def is_gemini_configured() -> bool:
     return bool(_get_gemini_key().strip())
 
 def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
-    """เรียก Gemini API และคืนค่า text response"""
     import requests as _req
     key = _get_gemini_key()
     if not key:
@@ -878,16 +877,153 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
         f"{_GEMINI_API_URL}?key={key}",
         json={
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "maxOutputTokens": max_tokens,
-                "temperature": 0.1,   # ต้องการความแม่นยำ ไม่ต้องการ creative
-            },
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
         },
         timeout=30,
     )
     resp.raise_for_status()
     data = resp.json()
     return data["candidates"][0]["content"]["parts"][0]["text"]
+
+def _call_gemini_with_search(prompt: str, max_tokens: int = 2000) -> str:
+    import requests as _req
+    key = _get_gemini_key()
+    if not key:
+        raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    resp = _req.post(
+        f"{_GEMINI_SEARCH_API_URL}?key={key}",
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "tools": [{"google_search": {}}],
+            "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    parts = data["candidates"][0]["content"].get("parts", [])
+    return "".join(p.get("text", "") for p in parts)
+
+
+def identify_product_with_search(raw_name: str) -> dict:
+    """
+    ให้ Gemini ค้นหาสินค้าจาก CJ Express จริง
+    คืนค่า: {"name": "ชื่อที่ถูกต้อง", "category": "หมวดหมู่", "confidence": "high/low"}
+    """
+    prompt = f"""ค้นหาข้อมูลสินค้าในร้าน CJ MORE (CJ Express / ซีเจ มอร์) ประเทศไทย
+
+ชื่อสินค้าจาก OCR (อาจอ่านผิด): "{raw_name}"
+
+กรุณา:
+1. ค้นหาว่าสินค้านี้คืออะไรในร้าน CJ MORE / CJ Express ไทย
+2. แก้ไขชื่อให้ถูกต้อง (ถ้า OCR อ่านผิด)
+3. จัดหมวดหมู่ตาม 8 หมวดนี้เท่านั้น:
+   - Bao Cafe (เครื่องดื่ม Bao Cafe ทุกเมนู)
+   - อาหารพร้อมทานและเบเกอรี่
+   - ขนมและของขบเคี้ยว
+   - เครื่องดื่ม
+   - ของใช้ส่วนตัว
+   - ของใช้ในบ้าน
+   - เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ
+   - สินค้าเบ็ดเตล็ดอื่นๆ
+
+ตอบเป็น JSON เท่านั้น:
+{{"name": "ชื่อสินค้าที่ถูกต้อง", "category": "หมวดหมู่", "confidence": "high หรือ low"}}"""
+
+    try:
+        result = _call_gemini_with_search(prompt, max_tokens=200)
+        result = re.sub(r"```(?:json)?\s*|\s*```", "", result).strip()
+        # หา JSON ใน response
+        m = re.search(r'\{[^{}]+\}', result, re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+    except Exception:
+        pass
+    return {"name": raw_name, "category": "สินค้าเบ็ดเตล็ดอื่นๆ", "confidence": "low"}
+
+
+def identify_products_batch_with_search(items: list) -> list:
+    """
+    ให้ Gemini ค้นหาสินค้าทั้งหมดในบิลพร้อมกันใน 1 call
+    ประหยัด API call กว่าเรียกทีละรายการ
+    """
+    if not items:
+        return items
+
+    names = [it.get("ชื่อสินค้า", "") for it in items]
+
+    # Bao จัด rule-based ก่อน ไม่ต้องค้น
+    bao_flags = [_is_bao_item(n) for n in names]
+    pending   = [(i, n) for i, (n, bao) in enumerate(zip(names, bao_flags)) if not bao]
+
+    if not pending:
+        # ทุกตัวเป็น Bao
+        for it in items:
+            it["หมวดหมู่"] = BAO_CAFE_CATEGORY
+        return items
+
+    pending_indices = [i for i, _ in pending]
+    pending_names   = [n for _, n in pending]
+    names_str = "\n".join(f"{i+1}. {n}" for i, n in enumerate(pending_names))
+
+    prompt = f"""ค้นหาข้อมูลสินค้าในร้าน CJ MORE (CJ Express / ซีเจ มอร์) ประเทศไทย
+
+รายการสินค้าจาก OCR (อาจอ่านผิด):
+{names_str}
+
+สำหรับสินค้าแต่ละรายการ:
+1. ค้นหาว่าคืออะไรในร้าน CJ MORE ไทย โดยเปรียบเทียบกับสินค้าจริงที่มีขายในร้าน
+2. แก้ไขชื่อให้ถูกต้อง (ถ้า OCR อ่านผิด เช่น "เฮอร ลอกโกแลตครีม" → "เฮอร์ชีย์ ช็อกโกแลตครีม")
+3. จัดหมวดหมู่ตาม 8 หมวดนี้:
+   - Bao Cafe: เครื่องดื่ม Bao Cafe (Bao ลาเต้, Bao อเมริกาโน่ ฯลฯ)
+   - อาหารพร้อมทานและเบเกอรี่: อาหาร เบเกอรี่ บะหมี่ ขนมปัง
+   - ขนมและของขบเคี้ยว: ขนม สแน็ค ช็อกโกแลต
+   - เครื่องดื่ม: น้ำดื่ม น้ำอัดลม นม ชา กาแฟ (ที่ไม่ใช่ Bao Cafe)
+   - ของใช้ส่วนตัว: สบู่ แชมพู ยาสีฟัน
+   - ของใช้ในบ้าน: ทิชชู ผงซักฟอก ถุงขยะ
+   - เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ: ยา พลาสเตอร์
+   - สินค้าเบ็ดเตล็ดอื่นๆ: บุหรี่ ไฟแช็ก บัตรเติมเงิน
+
+ตอบเป็น JSON array เรียงตามลำดับเดิมเท่านั้น ไม่ต้องอธิบาย:
+[
+  {{"name": "ชื่อที่ถูกต้อง", "category": "หมวดหมู่"}},
+  ...
+]"""
+
+    try:
+        result = _call_gemini_with_search(prompt, max_tokens=1000)
+        result = re.sub(r"```(?:json)?\s*|\s*```", "", result).strip()
+        m = re.search(r'\[.*\]', result, re.DOTALL)
+        if m:
+            parsed = json.loads(m.group(0))
+            if isinstance(parsed, list) and len(parsed) == len(pending_names):
+                # อัปเดต items
+                updated = [it.copy() for it in items]
+                for list_pos, original_idx in enumerate(pending_indices):
+                    p = parsed[list_pos]
+                    corrected_name = str(p.get("name", names[original_idx]))
+                    cat = str(p.get("category", "สินค้าเบ็ดเตล็ดอื่นๆ"))
+                    # rule-based override เสมอ
+                    if _is_bao_item(corrected_name) or _is_bao_item(names[original_idx]):
+                        cat = BAO_CAFE_CATEGORY
+                    updated[original_idx]["ชื่อสินค้า"] = corrected_name
+                    updated[original_idx]["หมวดหมู่"]  = cat
+                # จัด Bao ที่เหลือ
+                for i, (it, bao) in enumerate(zip(updated, bao_flags)):
+                    if bao:
+                        updated[i]["หมวดหมู่"] = BAO_CAFE_CATEGORY
+                return updated
+    except Exception:
+        pass
+
+    # fallback: ใช้ categorize_items_batch แบบเดิม
+    cats = categorize_items_batch(items)
+    result_items = [it.copy() for it in items]
+    for i, cat in enumerate(cats):
+        result_items[i]["หมวดหมู่"] = cat
+    return result_items
+
+
 
 
 # ── constants (วางไว้ระดับ module ก่อน฿ฟังก์ชัน) ─────────────────────────────
@@ -1082,7 +1218,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด
 - บางครั้ง OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo" — ให้แปลงเป็น "Bao" เสมอ"""
 
-     prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
+    prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
 
 {raw_text}
 
@@ -2130,6 +2266,7 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     )
                     bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                     items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
+                    items = identify_products_batch_with_search(items)  # ← Web Search
                 else:
                     bill  = extract_receipt(text)
                     items = extract_items_cj(text)
@@ -2150,6 +2287,7 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                         )
                         bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                         items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
+                        items = identify_products_batch_with_search(items)  # ← Web Search
                     else:
                         bill  = extract_receipt(text)
                         items = extract_items_cj(text)

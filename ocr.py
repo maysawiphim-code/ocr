@@ -639,7 +639,21 @@ def run_ocr_google_drive(crop_cv) -> str:
         raw_text = export_resp.content.decode("utf-8")
         # ── deduplicate: Google Drive OCR บางครั้ง export ซ้ำ 2 รอบ ──
         # ── แก้ form feed: Google Drive ใช้ \f คั่นหน้า → รวมเป็นบรรทัดเดียว ──
+       # ── ลบ BOM และ separator ต้นไฟล์ที่ Google Drive ใส่มา ──
+        raw_text = raw_text.lstrip('\ufeff')  # ลบ BOM
         raw_text = raw_text.replace('\f', '\n').replace('\x0c', '\n')
+
+        # ── ลบบรรทัด "________________" ที่ต้นไฟล์ ──
+        lines = raw_text.split('\n')
+        # ข้ามบรรทัดแรกๆ ที่เป็น separator หรือว่างเปล่า
+        start = 0
+        for i, line in enumerate(lines):
+            if re.search(r'^_{5,}$', line.strip()):
+                start = i + 1
+            elif line.strip() and start > 0:
+                break
+        if start > 0:
+            raw_text = '\n'.join(lines[start:])
 
         # ── deduplicate: ถ้า text ซ้ำ 2 รอบ ให้เอาแค่ครึ่งแรก ──
         _lines = [l for l in raw_text.split('\n') if l.strip()]

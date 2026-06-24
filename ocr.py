@@ -890,12 +890,39 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
     return data["candidates"][0]["content"]["parts"][0]["text"]
 
 
+# ── constants (วางไว้ระดับ module ก่อน฿ฟังก์ชัน) ─────────────────────────────
+BAO_CAFE_CATEGORY = "Bao Cafe"
+
+CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 8 หมวดนี้เท่านั้น):
+1. Bao Cafe
+   ตัวอย่าง: สินค้าที่มีคำว่า "Bao" เช่น 1 Bao ลาเต้, 1 Bao ชาเขียว, 1 Bao โกโก้
+   กฎพิเศษ: ถ้าชื่อสินค้ามีคำว่า "Bao" ไม่ว่าจะสะกดแบบใด ให้จัดเป็นหมวดนี้เสมอ
+2. อาหารพร้อมทานและเบเกอรี่
+   ตัวอย่าง: ข้าวกล่อง แซนด์วิช บะหมี่กึ่งสำเร็จรูป ขนมปัง ไส้กรอก อาหารแช่แข็งอุ่นทานได้ทันที
+3. ขนมและของขบเคี้ยว
+   ตัวอย่าง: ลูกอม หมากฝรั่ง ช็อกโกแลต มันฝรั่งทอด ถั่ว สแน็ค
+4. เครื่องดื่ม
+   ตัวอย่าง: น้ำดื่ม น้ำอัดลม ชา กาแฟ นม เครื่องดื่มชูกำลัง เครื่องดื่มเกลือแร่
+5. ของใช้ส่วนตัว
+   ตัวอย่าง: สบู่ แชมพู ยาสีฟัน แปรงสีฟัน ครีมอาบน้ำ โลชั่น ผ้าอนามัย
+6. ของใช้ในบ้าน
+   ตัวอย่าง: ผงซักฟอก น้ำยาปรับผ้านุ่ม น้ำยาล้างจาน กระดาษทิชชู กระดาษชำระ ถุงขยะ
+7. เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ
+   ตัวอย่าง: ยาสามัญประจำบ้าน พลาสเตอร์ยา ยาหม่อง หน้ากากอนามัย
+8. สินค้าเบ็ดเตล็ดอื่นๆ
+   ตัวอย่าง: ถ่านไฟฉาย ไฟแช็ก ปากกา สมุด อุปกรณ์เครื่องเขียน บริการเติมเงิน"""
+
+
+def _is_bao_item(name: str) -> bool:
+    """True ถ้าชื่อสินค้ามีคำว่า Bao (case-insensitive)"""
+    return bool(re.search(r'\bbao\b', name, re.IGNORECASE))
+
+
+# ── extract_with_gemini (แก้ตรงนี้) ──────────────────────────────────────────
 def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
     """
     ใช้ Gemini วิเคราะห์ raw text จากบิล CJ Express ครบทั้งใบ
     ocr_source: "gdrive" หรือ "tesseract"/"vision"
-    - gdrive: ราคาแยกบรรทัด (ชื่อ → ราคาต่อหน่วย → ราคารวม V)
-    - tesseract/vision: ราคาอยู่บรรทัดเดียวกับชื่อสินค้า
     """
     if ocr_source == "gdrive":
         format_hint = """รูปแบบข้อมูล (แต่ละสินค้ามี 3 บรรทัด):
@@ -928,6 +955,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "items": [
     {{
       "ชื่อสินค้า": "ชื่อสินค้า",
+      "หมวดหมู่": "หมวดหมู่สินค้า",
       "จำนวน": 1,
       "ราคาต่อหน่วย": 0.0,
       "ยอดรวมสินค้า": 0.0
@@ -935,8 +963,11 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   ]
 }}
 
+{CATEGORY_PROMPT}
+
 กฎสำคัญ:
 - items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม
+- หมวดหมู่ Bao Cafe: ถ้าชื่อสินค้ามีคำว่า "Bao" ไม่ว่าจะสะกดแบบใด ให้จัดเป็น "Bao Cafe" เสมอ ห้ามจัดเป็นหมวดอื่น
 - pos_id: ต้องเป็นตัวเลข 4-5 หลักของสาขา (เช่น 2144) ไม่ใช่รหัส POS เครื่อง (เช่น N02)
 - total_amount: ยอดรวมหลังหักส่วนลด
 - cash: เงินที่จ่าย (เงินสด/QR)
@@ -964,8 +995,12 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 
         items = []
         for it in data.get("items", []):
+            name = str(it.get("ชื่อสินค้า", ""))
+            # rule-based override: Bao ชนะ Gemini เสมอ
+            cat = BAO_CAFE_CATEGORY if _is_bao_item(name) else str(it.get("หมวดหมู่", "สินค้าเบ็ดเตล็ดอื่นๆ"))
             items.append({
-                "ชื่อสินค้า":    str(it.get("ชื่อสินค้า", "")),
+                "ชื่อสินค้า":    name,
+                "หมวดหมู่":     cat,
                 "จำนวน":        int(it.get("จำนวน", 1)),
                 "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
                 "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
@@ -975,6 +1010,71 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 
     except Exception as e:
         return {"bill": None, "items": [], "ok": False, "error": str(e)}
+
+
+def extract_items_with_gemini(raw_text: str) -> list:
+    """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
+    result = extract_with_gemini(raw_text)
+    return result.get("items", [])
+
+
+def categorize_items_batch(items: list) -> list:
+    """ให้ Gemini จัดหมวดหมู่สินค้าทั้งหมดทีเดียว (fallback กรณีไม่มีหมวดใน item)"""
+    if not items:
+        return []
+
+    names = [it.get("ชื่อสินค้า", "") for it in items]
+
+    # rule-based ก่อน: Bao Cafe ไม่ต้องรอ Gemini
+    pre_assigned = [_is_bao_item(n) for n in names]
+
+    if not is_gemini_configured():
+        return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ"
+                for bao in pre_assigned]
+
+    # ส่งเฉพาะสินค้าที่ยังไม่รู้หมวดให้ Gemini (ประหยัด token)
+    pending_indices = [i for i, bao in enumerate(pre_assigned) if not bao]
+    pending_names   = [names[i] for i in pending_indices]
+
+    result_cats = [BAO_CAFE_CATEGORY if bao else "" for bao in pre_assigned]
+
+    if not pending_names:
+        return result_cats
+
+    try:
+        names_str = "\n".join(f"{i+1}. {n}" for i, n in enumerate(pending_names))
+        prompt = f"""คุณคือผู้เชี่ยวชาญสินค้าในร้านสะดวกซื้อ CJ Express
+จัดหมวดหมู่สินค้าต่อไปนี้ให้ครบทุกรายการ:
+
+{names_str}
+
+{CATEGORY_PROMPT}
+
+กฎ:
+- ถ้าชื่อสินค้ามีคำว่า "Bao" ให้จัดเป็น "Bao Cafe" เสมอ
+- ใช้ความรู้เกี่ยวกับสินค้าในร้านสะดวกซื้อไทยในการตัดสินใจ
+- ถ้าไม่แน่ใจให้ใส่ "สินค้าเบ็ดเตล็ดอื่นๆ"
+- ตอบเป็น JSON array เรียงตามลำดับเดิมเท่านั้น ไม่ต้องอธิบาย
+- ตัวอย่าง: ["เครื่องดื่ม","อาหารพร้อมทานและเบเกอรี่","ของใช้ส่วนตัว"]"""
+
+        raw = _call_gemini(prompt, max_tokens=500).strip()
+        raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+        cats = json.loads(raw)
+
+        if isinstance(cats, list) and len(cats) == len(pending_names):
+            for list_pos, original_idx in enumerate(pending_indices):
+                cat = cats[list_pos]
+                # rule-based ชนะเสมอ
+                if _is_bao_item(names[original_idx]):
+                    cat = BAO_CAFE_CATEGORY
+                result_cats[original_idx] = cat
+            return result_cats
+
+    except Exception:
+        pass
+
+    return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ"
+            for bao in pre_assigned]
 
 
 def extract_items_with_gemini(raw_text: str) -> list:
@@ -1627,31 +1727,37 @@ def extract_items_cj(text: str) -> list:
                "www.","FB:","ร้องเรียน","สมัคร"]
 
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
-    # รองรับ qty เป็นตัวเลขหรือ "-"
     _QTY    = r'(?:\d+|-)'
     _full = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
     _fb_a  = re.compile(r'^(.+?)\s+(\d+[.,]\d{2})\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
     _fb_b = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})' + _SUFFIX + r'$')
     _fb_c = re.compile(r'^[\.]?\s*(' + _QTY + r')\s*(.+?)\s+(\d+[.,]\d{2})\s*$')
 
+    def _make_item(nm: str, qty: int, unit_price: float, total: float) -> dict:
+        """สร้าง item dict พร้อม rule-based หมวดหมู่"""
+        return {
+            "ชื่อสินค้า":    nm,
+            "หมวดหมู่":     BAO_CAFE_CATEGORY if _is_bao_item(nm) else "สินค้าเบ็ดเตล็ดอื่นๆ",
+            "จำนวน":        qty,
+            "ราคาต่อหน่วย": unit_price,
+            "ยอดรวมสินค้า": total,
+        }
+
     for line in lines[start_idx:]:
         line = line.strip()
         if not line: continue
         compact = _collapse(line)
 
-        # หยุดเมื่อเจอ keyword สรุปบิล
         if any(k in line or k in compact for k in stop_kw): break
         if re.search(r'จ.{0,3}นวนส', compact): break
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
-        if re.search(r'-\s*\d+[.,]\d{2}', line): continue   # ส่วนลด (ติดลบ)
+        if re.search(r'-\s*\d+[.,]\d{2}', line): continue
         if len(line) < 4: continue
 
-        # ทำความสะอาดบรรทัด
         line_clean = re.sub(r'^[.\[\]>"\'`*]+\s*', '', line.strip())
         if not line_clean: line_clean = line.strip()
-        # ลบ V/v ท้ายบรรทัดที่อาจเหลืออยู่
         line_clean = re.sub(r'\s+[Vv]\s*$', '', line_clean).strip()
         lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$', '', line_clean).strip())
 
@@ -1663,8 +1769,7 @@ def extract_items_cj(text: str) -> list:
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                 u = parse_price(up); tt = parse_price(tp)
                 if tt < u * 0.5: tt = round(u * qty, 2)
-                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
-                              "ราคาต่อหน่วย": u, "ยอดรวมสินค้า": tt})
+                items.append(_make_item(nm, qty, u, tt))
             continue
 
         m = _fb_a.match(lf)
@@ -1672,9 +1777,7 @@ def extract_items_cj(text: str) -> list:
             nm, up, tp = m.groups()
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
-                items.append({"ชื่อสินค้า": nm, "จำนวน": 1,
-                              "ราคาต่อหน่วย": parse_price(up),
-                              "ยอดรวมสินค้า": parse_price(tp)})
+                items.append(_make_item(nm, 1, parse_price(up), parse_price(tp)))
             continue
 
         m = _fb_b.match(lf)
@@ -1684,8 +1787,7 @@ def extract_items_cj(text: str) -> list:
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
-                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": round(p * qty, 2)})
+                items.append(_make_item(nm, qty, p, round(p * qty, 2)))
             continue
 
         m = _fb_c.match(lf)
@@ -1696,11 +1798,9 @@ def extract_items_cj(text: str) -> list:
             nm = _clean_item_name(nm)
             if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z]', '', nm)) >= 3:
                 p = parse_price(price)
-                items.append({"ชื่อสินค้า": nm, "จำนวน": qty,
-                              "ราคาต่อหน่วย": p, "ยอดรวมสินค้า": round(p * qty, 2)})
+                items.append(_make_item(nm, qty, p, round(p * qty, 2)))
 
     return items
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Excel export

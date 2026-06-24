@@ -742,6 +742,16 @@ def run_ocr_google_vision(crop_cv) -> str:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
     gray = whiten_background(crop_cv)
     img_for_api = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    # ── resize ให้ด้านยาวไม่เกิน 1500px ──
+    h, w = img_for_api.shape[:2]
+    max_side = 1500
+    if max(h, w) > max_side:
+        scale = max_side / max(h, w)
+        img_for_api = cv2.resize(img_for_api,
+                                 (int(w * scale), int(h * scale)),
+                                 interpolation=cv2.INTER_AREA)
+
     success, buf = cv2.imencode(".png", img_for_api)
     if not success:
         raise RuntimeError("แปลงภาพเป็น PNG ไม่สำเร็จ")
@@ -2066,6 +2076,14 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
         if progress_cb: progress_cb(i, n, fname)
         try:
             pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
+
+            # ── resize รูปใหญ่ให้เล็กลงก่อน ──
+            max_side = 1500
+            w, h = pil.size
+            if max(w, h) > max_side:
+                scale = max_side / max(w, h)
+                pil = pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
             img_cv = pil_to_cv(pil)
             if auto_detect_multi:
                 sub_crops = auto_crop_receipts(img_cv)

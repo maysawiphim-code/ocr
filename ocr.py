@@ -895,14 +895,14 @@ BAO_CAFE_CATEGORY = "Bao Cafe"
 
 CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 8 หมวดนี้เท่านั้น):
 1. Bao Cafe
-   ตัวอย่าง: สินค้าที่มีคำว่า "Bao" เช่น 1 Bao ลาเต้, 1 Bao ชาเขียว, 1 Bao โกโก้
-   กฎพิเศษ: ถ้าชื่อสินค้ามีคำว่า "Bao" ไม่ว่าจะสะกดแบบใด ให้จัดเป็นหมวดนี้เสมอ
+   ตัวอย่าง: Bao ลาเต้, Bao อเมริกาโน่, Bao เอสเปรสโซ่, Bao โคโค่, Bao นมสตรอว์เบอร์รี, Bao ชาเขียว
+   กฎพิเศษ: ชื่อขึ้นต้นด้วย "Bao", "Beo", "B80", "Be0" หรือคล้ายกัน → หมวดนี้เสมอ
 2. อาหารพร้อมทานและเบเกอรี่
-   ตัวอย่าง: ข้าวกล่อง แซนด์วิช บะหมี่กึ่งสำเร็จรูป ขนมปัง ไส้กรอก อาหารแช่แข็งอุ่นทานได้ทันที
+   ตัวอย่าง: ข้าวกล่อง แซนด์วิช บะหมี่กึ่งสำเร็จรูป ขนมปัง ไส้กรอก เค้ก ยูโรเค้ก อาหารแช่แข็ง มาม่า
 3. ขนมและของขบเคี้ยว
-   ตัวอย่าง: ลูกอม หมากฝรั่ง ช็อกโกแลต มันฝรั่งทอด ถั่ว สแน็ค
+   ตัวอย่าง: ลูกอม หมากฝรั่ง ช็อกโกแลต เฮอร์ชีย์ มันฝรั่งทอด ถั่ว สแน็ค โอโชะ ข้าวอบกรอบ
 4. เครื่องดื่ม
-   ตัวอย่าง: น้ำดื่ม น้ำอัดลม ชา กาแฟ นม เครื่องดื่มชูกำลัง เครื่องดื่มเกลือแร่
+   ตัวอย่าง: น้ำดื่ม น้ำอัดลม สไปรท์ โคคา ชา กาแฟ นม ไมโล คาราบาว เครื่องดื่มชูกำลัง อราวน์
 5. ของใช้ส่วนตัว
    ตัวอย่าง: สบู่ แชมพู ยาสีฟัน แปรงสีฟัน ครีมอาบน้ำ โลชั่น ผ้าอนามัย
 6. ของใช้ในบ้าน
@@ -910,12 +910,18 @@ CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (เล
 7. เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ
    ตัวอย่าง: ยาสามัญประจำบ้าน พลาสเตอร์ยา ยาหม่อง หน้ากากอนามัย
 8. สินค้าเบ็ดเตล็ดอื่นๆ
-   ตัวอย่าง: ถ่านไฟฉาย ไฟแช็ก ปากกา สมุด อุปกรณ์เครื่องเขียน บริการเติมเงิน"""
+   ตัวอย่าง: ถ่านไฟฉาย ไฟแช็ก ปากกา สมุด บุหรี่ ซิการ์ แอล เอ็ม บุหรี่ อุปกรณ์เครื่องเขียน บริการเติมเงิน"""
 
 
 def _is_bao_item(name: str) -> bool:
-    """True ถ้าชื่อสินค้ามีคำว่า Bao (case-insensitive) — รองรับ OCR ที่อาจอ่านผิด"""
-    return bool(re.search(r'bao|เบา\s*คา|บาว\s*คา', name, re.IGNORECASE))
+    """True ถ้าชื่อสินค้าเป็น Bao Cafe — รองรับ OCR อ่านผิดหลายแบบ"""
+    return bool(re.search(
+        r'\bb[a8e๐o0][o๐0][\W_]|'   # Bao/Beo/B80/Be0 ตามด้วยช่องว่างหรือ_
+        r'\bb[a8e๐o0][o๐0]$|'        # ท้ายบรรทัด
+        r'bao|'                        # ปกติ
+        r'เบา\s*คา|บาว\s*คา',         # ภาษาไทย
+        name, re.IGNORECASE
+    ))
 
 
 # ── extract_with_gemini (แก้ตรงนี้) ──────────────────────────────────────────
@@ -925,16 +931,19 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
     ocr_source: "gdrive" หรือ "tesseract"/"vision"
     """
     if ocr_source == "gdrive":
-        format_hint = """รูปแบบข้อมูล (แต่ละสินค้ามี 3 บรรทัด):
-- บรรทัด 1: จำนวน ชื่อสินค้า  (เช่น "1 คาราบาวแดง" หรือ "- M&M ช็อกโกแลต")
-- บรรทัด 2: ราคาต่อหน่วย  (เช่น "12.00")
-- บรรทัด 3: ราคารวม V  (เช่น "12.00 V" หรือ "24.00 V")
-หมายเหตุ: "-" หน้าชื่อสินค้าหมายถึงจำนวน 1"""
+        format_hint = """รูปแบบข้อมูล (Google Drive OCR แยกราคาเป็นบรรทัดใหม่):
+- บรรทัด 1: จำนวน ชื่อสินค้า  (เช่น "1 Bao ลาเต้เย็น" หรือ "1 มาม่า หมูสับ 60g x10")
+- บรรทัด 2: ราคาต่อหน่วย  (เช่น "40.00")
+- บรรทัด 3: ราคารวม V  (เช่น "40.00 V")
+- บางครั้ง OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo" — ให้แปลงเป็น "Bao" เสมอ
+- บรรทัด "หวานน้อย" "หวานปกติ" "ไม่หวาน" คือ note ไม่ใช่สินค้า ข้ามไป
+- "-" หน้าชื่อสินค้าหมายถึงจำนวน 1"""
     else:
         format_hint = """รูปแบบข้อมูล (แต่ละสินค้าอยู่บรรทัดเดียว):
 - รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม  (เช่น "1 คาราบาวแดง 12.00 12.00")
 - หรือ: จำนวน ชื่อสินค้า ราคา  (เช่น "2 น้ำดื่ม 10.00 20.00")
-- OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด"""
+- OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด
+- บางครั้ง OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo" — ให้แปลงเป็น "Bao" เสมอ"""
 
     prompt = f"""นี่คือข้อความจากใบเสร็จร้าน CJ Express ที่อ่านด้วย OCR:
 
@@ -947,7 +956,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "date": "วัน/เดือน/ปี",
   "time": "HH:MM",
   "branch": "ชื่อสาขา",
-  "pos_id": "รหัสสาขา 4-5 หลัก (ตัวเลขเท่านั้น ไม่ใช่ N02 หรือ POS code)",
+  "pos_id": "รหัสสาขา 5 หลัก (ตัวเลขเท่านั้น เช่น 01275 หรือ 01179)",
   "rcpt_no": "เลขที่ใบเสร็จ",
   "total_amount": 0.0,
   "cash": 0.0,
@@ -967,8 +976,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 
 กฎสำคัญ:
 - items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม
-- หมวดหมู่ Bao Cafe: ถ้าชื่อสินค้ามีคำว่า "Bao" ไม่ว่าจะสะกดแบบใด ให้จัดเป็น "Bao Cafe" เสมอ ห้ามจัดเป็นหมวดอื่น
-- pos_id: ต้องเป็นตัวเลข 4-5 หลักของสาขา (เช่น 2144) ไม่ใช่รหัส POS เครื่อง (เช่น N02)
+- ชื่อสินค้าที่ขึ้นต้นด้วย "Bao", "Beo", "B80", "Be0", "Bo" ให้แปลงชื่อเป็น "Bao ..." และจัดหมวดเป็น "Bao Cafe" เสมอ
+- pos_id: ต้องเป็นตัวเลข 5 หลักของสาขา (เช่น 01275, 01179, 01417) ไม่ใช่รหัส POS (เช่น N02, NO1)
 - total_amount: ยอดรวมหลังหักส่วนลด
 - cash: เงินที่จ่าย (เงินสด/QR)
 - change: เงินทอน
@@ -1013,74 +1022,6 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 
     except Exception as e:
         return {"bill": None, "items": [], "ok": False, "error": str(e)}
-
-
-
-
-
-def categorize_items_batch(items: list) -> list:
-    """ให้ Gemini จัดหมวดหมู่สินค้าทั้งหมดทีเดียว (fallback กรณีไม่มีหมวดใน item)"""
-    if not items:
-        return []
-
-    names = [it.get("ชื่อสินค้า", "") for it in items]
-
-    # rule-based ก่อน: Bao Cafe ไม่ต้องรอ Gemini
-    pre_assigned = [_is_bao_item(n) for n in names]
-
-    if not is_gemini_configured():
-        return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ"
-                for bao in pre_assigned]
-
-    # ส่งเฉพาะสินค้าที่ยังไม่รู้หมวดให้ Gemini (ประหยัด token)
-    pending_indices = [i for i, bao in enumerate(pre_assigned) if not bao]
-    pending_names   = [names[i] for i in pending_indices]
-
-    result_cats = [BAO_CAFE_CATEGORY if bao else "" for bao in pre_assigned]
-
-    if not pending_names:
-        return result_cats
-
-    try:
-        names_str = "\n".join(f"{i+1}. {n}" for i, n in enumerate(pending_names))
-        prompt = f"""คุณคือผู้เชี่ยวชาญสินค้าในร้านสะดวกซื้อ CJ Express
-จัดหมวดหมู่สินค้าต่อไปนี้ให้ครบทุกรายการ:
-
-{names_str}
-
-{CATEGORY_PROMPT}
-
-กฎ:
-- ถ้าชื่อสินค้ามีคำว่า "Bao" ให้จัดเป็น "Bao Cafe" เสมอ
-- ใช้ความรู้เกี่ยวกับสินค้าในร้านสะดวกซื้อไทยในการตัดสินใจ
-- ถ้าไม่แน่ใจให้ใส่ "สินค้าเบ็ดเตล็ดอื่นๆ"
-- ตอบเป็น JSON array เรียงตามลำดับเดิมเท่านั้น ไม่ต้องอธิบาย
-- ตัวอย่าง: ["เครื่องดื่ม","อาหารพร้อมทานและเบเกอรี่","ของใช้ส่วนตัว"]"""
-
-        raw = _call_gemini(prompt, max_tokens=500).strip()
-        raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
-        cats = json.loads(raw)
-
-        if isinstance(cats, list) and len(cats) == len(pending_names):
-            for list_pos, original_idx in enumerate(pending_indices):
-                cat = cats[list_pos]
-                # rule-based ชนะเสมอ
-                if _is_bao_item(names[original_idx]):
-                    cat = BAO_CAFE_CATEGORY
-                result_cats[original_idx] = cat
-            return result_cats
-
-    except Exception:
-        pass
-
-    return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ"
-            for bao in pre_assigned]
-
-
-def extract_items_with_gemini(raw_text: str) -> list:
-    """wrapper สำหรับดึงแค่ items (ใช้ใน fallback chain)"""
-    result = extract_with_gemini(raw_text)
-    return result.get("items", [])
 
 
 

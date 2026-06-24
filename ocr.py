@@ -2778,7 +2778,11 @@ def main():
                         # - gdrive: ใช้ raw text จาก Google Doc (สะอาดสุด)
                         # - tesseract/vision: ใช้ cleaned text แทน
                         text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
-
+                        st.write("ocr_engine:", S.ocr_engine)
+                        st.write("gdrive_raw:", repr(gdrive_raw[:50]) if gdrive_raw else "EMPTY")
+                        st.write("text:", repr(text[:50]) if text else "EMPTY")
+                        st.write("text_for_gemini:", repr(text_for_gemini[:50]) if text_for_gemini else "EMPTY")
+                        st.write("gemini configured:", is_gemini_configured())
                         if is_gemini_configured() and text_for_gemini.strip():
                             progress.progress(
                                 (ci + 0.5) / len(crops),

@@ -940,21 +940,16 @@ def identify_product_with_search(raw_name: str) -> dict:
     return {"name": raw_name, "category": "สินค้าเบ็ดเตล็ดอื่นๆ", "confidence": "low"}
 
 def identify_products_batch_with_search(items: list) -> list:
-    """
-    ให้ Gemini ค้นหาสินค้าทั้งหมดในบิลพร้อมกันใน 1 call
-    ประหยัด API call กว่าเรียกทีละรายการ
-    """
     if not items:
         return items
 
     names = [it.get("ชื่อสินค้า", "") for it in items]
-
-    # Bao จัด rule-based ก่อน ไม่ต้องค้น
     bao_flags = [_is_bao_item(n) for n in names]
-    pending   = [(i, n) for i, (n, bao) in enumerate(zip(names, bao_flags)) if not bao]
+
+    # ส่งทุกรายการที่ไม่ใช่ Bao ไปให้ Gemini ค้นหา (ไม่ข้ามแม้จะมีหมวดแล้ว)
+    pending = [(i, n) for i, (n, bao) in enumerate(zip(names, bao_flags)) if not bao]
 
     if not pending:
-        # ทุกตัวเป็น Bao
         for it in items:
             it["หมวดหมู่"] = BAO_CAFE_CATEGORY
         return items
@@ -974,15 +969,14 @@ def identify_products_batch_with_search(items: list) -> list:
 3. แก้ไขชื่อให้ถูกต้อง — OCR มักอ่านผิดดังนี้:
    - ตัวอักษรใกล้เคียง: ม→น, น→ม, ว→ง, ะ→า, ุ→ู, ็→้ ฯลฯ
    - ตัวเลขปน: 0→o, 1→l, 6→ก ฯลฯ
-   - ตัวอย่างการแก้: "เฮอร ลอกโกแลตครีม" → "เฮอร์ชีย์ ช็อกโกแลตครีม"
-                      "ยูโร ติก สสสตางค.ศ12" → "ยูโรติก สติ๊กสตางค์ 12บาท"
-                      "มาม่า หมุน 600 x 10" → "มาม่า หมูสับ 60g x10"
-                      "โอโนะข้าวอบกรอบ" → "โอโชะ ข้าวอบกรอบ"
+   - "ยูโร ติก สสสตางค.ศ12" → "ยูโรติก สติ๊กสตางค์ 12บาท" (หมวด: อาหารพร้อมทานและเบเกอรี่)
+   - "มาม่า หมุน 600 x 10" → "มาม่า หมูสับ 60g x10" (หมวด: อาหารพร้อมทานและเบเกอรี่)
+   - "โอโนะข้าวอบกรอบ" → "โอโชะ ข้าวอบกรอบ" (หมวด: ขนมและของขบเคี้ยว)
 4. จัดหมวดหมู่ตาม 8 หมวดนี้:
-   - Bao Cafe: เครื่องดื่ม Bao Cafe (Bao ลาเต้, Bao อเมริกาโน่ ฯลฯ)
-   - อาหารพร้อมทานและเบเกอรี่: อาหาร เบเกอรี่ บะหมี่ ขนมปัง ยูโรเค้ก ยูโรติก
-   - ขนมและของขบเคี้ยว: ขนม สแน็ค ช็อกโกแลต คุกกี้ เวเฟอร์
-   - เครื่องดื่ม: น้ำดื่ม น้ำอัดลม นม ชา กาแฟ (ที่ไม่ใช่ Bao Cafe)
+   - Bao Cafe: เครื่องดื่ม Bao Cafe
+   - อาหารพร้อมทานและเบเกอรี่: อาหาร เบเกอรี่ บะหมี่ ขนมปัง ยูโรเค้ก ยูโรติก มาม่า
+   - ขนมและของขบเคี้ยว: ขนม สแน็ค ช็อกโกแลต โอโชะ ข้าวอบกรอบ
+   - เครื่องดื่ม: น้ำดื่ม น้ำอัดลม นม ชา กาแฟ
    - ของใช้ส่วนตัว: สบู่ แชมพู ยาสีฟัน
    - ของใช้ในบ้าน: ทิชชู ผงซักฟอก ถุงขยะ
    - เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ: ยา พลาสเตอร์
@@ -1001,18 +995,15 @@ def identify_products_batch_with_search(items: list) -> list:
         if m:
             parsed = json.loads(m.group(0))
             if isinstance(parsed, list) and len(parsed) == len(pending_names):
-                # อัปเดต items
                 updated = [it.copy() for it in items]
                 for list_pos, original_idx in enumerate(pending_indices):
                     p = parsed[list_pos]
                     corrected_name = str(p.get("name", names[original_idx]))
                     cat = str(p.get("category", "สินค้าเบ็ดเตล็ดอื่นๆ"))
-                    # rule-based override เสมอ
                     if _is_bao_item(corrected_name) or _is_bao_item(names[original_idx]):
                         cat = BAO_CAFE_CATEGORY
                     updated[original_idx]["ชื่อสินค้า"] = corrected_name
                     updated[original_idx]["หมวดหมู่"]  = cat
-                # จัด Bao ที่เหลือ
                 for i, (it, bao) in enumerate(zip(updated, bao_flags)):
                     if bao:
                         updated[i]["หมวดหมู่"] = BAO_CAFE_CATEGORY
@@ -1020,7 +1011,6 @@ def identify_products_batch_with_search(items: list) -> list:
     except Exception:
         pass
 
-    # fallback: ใช้ categorize_items_batch แบบเดิม
     cats = categorize_items_batch(items)
     result_items = [it.copy() for it in items]
     for i, cat in enumerate(cats):

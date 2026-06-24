@@ -742,16 +742,6 @@ def run_ocr_google_vision(crop_cv) -> str:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
     gray = whiten_background(crop_cv)
     img_for_api = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-
-    # ── resize ให้ด้านยาวไม่เกิน 1500px ──
-    h, w = img_for_api.shape[:2]
-    max_side = 1500
-    if max(h, w) > max_side:
-        scale = max_side / max(h, w)
-        img_for_api = cv2.resize(img_for_api,
-                                 (int(w * scale), int(h * scale)),
-                                 interpolation=cv2.INTER_AREA)
-
     success, buf = cv2.imencode(".png", img_for_api)
     if not success:
         raise RuntimeError("แปลงภาพเป็น PNG ไม่สำเร็จ")
@@ -968,6 +958,66 @@ def _is_bao_item(name: str) -> bool:
     ))
 
 
+def _categorize_by_rule(name: str) -> str:
+    """Rule-based categorization — ทำงานโดยไม่ต้องเรียก Gemini"""
+    if _is_bao_item(name):
+        return BAO_CAFE_CATEGORY
+    n = name.lower()
+
+    # อาหารพร้อมทานและเบเกอรี่
+    if re.search(
+        r'มาม่า|ไวไว|ยำยำ|บะหมี่|ข้าว|แซนด์|ขนมปัง|เค้ก|ยูโร|ไส้กรอก|'
+        r'หมูแผ่น|เนื้อแผ่น|สลัด|โจ๊ก|ซาลาเปา|ทอด|อบ|นึ่ง|แกง|ต้ม|ผัด|'
+        r'euro|bakery|bread', n):
+        return "อาหารพร้อมทานและเบเกอรี่"
+
+    # ขนมและของขบเคี้ยว
+    if re.search(
+        r'เฮอร์ช|ช็อก|chocolate|โอโช|ข้าวอบ|มันฝรั่ง|ป๊อปคอร์|ถั่ว|เยลลี่|'
+        r'ลูกอม|หมากฝรั่ง|สแน็ค|snack|คุกกี้|วาฟ|เวเฟอร์|ทอฟฟี่|ป๊อป|'
+        r'lays|lay\'s|เลย์|pringle|คอร์น|popcorn|candy|gummy|'
+        r'เล\s*คลาส|เลขคลาส|รสโนริ|สาหร่าย', n):
+        return "ขนมและของขบเคี้ยว"
+
+    # เครื่องดื่ม
+    if re.search(
+        r'น้ำ|นม|ชา|กาแฟ|coffee|tea|milk|โค้ก|coke|cola|เป๊ปซี่|pepsi|'
+        r'สไปรท์|sprite|แฟนต้า|fanta|คาราบาว|กระทิง|ไมโล|milo|โอวัล|'
+        r'อราวน์|โออิชิ|ทีช|เกลือแร่|gatorade|sponsor|100plus|'
+        r'เอสโคล่า|ซุปเปอร์กาแฟ|เนสท์เล่|nestle|นมสด|โยเกิร์ต|'
+        r'เครื่องดื่ม|drink|juice|น้ำผล|น้ำส้ม|น้ำมะ', n):
+        return "เครื่องดื่ม"
+
+    # ของใช้ส่วนตัว
+    if re.search(
+        r'สบู่|แชมพู|shampoo|ยาสีฟัน|แปรงสีฟัน|ครีมอาบ|โลชั่น|lotion|'
+        r'ผ้าอนามัย|ดีโอ|โรลออน|แป้ง|คอนแทค|ผ้าเช็ด|สกิน|skin|'
+        r'คุชชั่น|cushion|ครีม|serum|เซรั่ม|มอยส์|moisture|'
+        r'แมกโนเลีย|สคินทิฟ|ซี-วิท|วิตซี|vitamin\s*c|collagen|คอลลาเจน|'
+        r'ซันสกรีน|กันแดด|sunscreen|บีบี|cc\s*cream|foundation|'
+        r'ลิปสติก|ลิป|lip|mascara|blush|ไฮไลท์', n):
+        return "ของใช้ส่วนตัว"
+
+    # ของใช้ในบ้าน
+    if re.search(
+        r'ทิชชู|tissue|ผงซักฟอก|น้ำยาซัก|น้ำยาปรับ|น้ำยาล้าง|'
+        r'ถุงขยะ|ถุงพลาสติก|ฟิล์มห่อ|สก๊อตช์|สก็อต|cellox|'
+        r'comfort|downy|ดาวน์นี่|sunlight|vim|เปา|ผงซัก|'
+        r'น้ำยา|ไม้กวาด|ไม้ถู|แปรงขัด|ฟองน้ำ|sponge', n):
+        return "ของใช้ในบ้าน"
+
+    # เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ
+    if re.search(
+        r'ยา|พลาสเตอร์|แอลกอฮอล์|alcohol|หน้ากาก|mask|วิตามิน|vitamin|'
+        r'อาหารเสริม|supplement|ถุงยาง|ผ้าพันแผล|เทอร์โม|thermometer|'
+        r'ซี-วิท|cevit|แคลเซียม|calcium|omega|โอเมก้า|'
+        r'ยาแก้|ยาลด|ยาบรรเทา|paracetamol|ibuprofen', n):
+        return "เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ"
+
+    # สินค้าเบ็ดเตล็ดอื่นๆ
+    return "สินค้าเบ็ดเตล็ดอื่นๆ"
+
+
 def categorize_items_batch(items: list) -> list:
     if not items:
         return []
@@ -1125,7 +1175,14 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
             if _is_bao_item(name):
                 cat = BAO_CAFE_CATEGORY
             else:
-                cat = str(it.get("หมวดหมู่", "สินค้าเบ็ดเตล็ดอื่นๆ"))
+                cat = str(it.get("หมวดหมู่", ""))
+                # ถ้า Gemini ไม่ได้จัดหมวด หรือจัดเป็นเบ็ดเตล็ด ให้ลอง rule-based ก่อน
+                if not cat or cat == "สินค้าเบ็ดเตล็ดอื่นๆ":
+                    rule_cat = _categorize_by_rule(name)
+                    if rule_cat != "สินค้าเบ็ดเตล็ดอื่นๆ":
+                        cat = rule_cat
+                if not cat:
+                    cat = "สินค้าเบ็ดเตล็ดอื่นๆ"
             items.append({
                 "ชื่อสินค้า":    name,
                 "หมวดหมู่":     cat,
@@ -1702,7 +1759,7 @@ def extract_items_cj(text: str) -> list:
     def _make_item(nm: str, qty: int, unit_price: float, total: float) -> dict:
         return {
             "ชื่อสินค้า":    nm,
-            "หมวดหมู่":     BAO_CAFE_CATEGORY if _is_bao_item(nm) else "สินค้าเบ็ดเตล็ดอื่นๆ",
+            "หมวดหมู่":     _categorize_by_rule(nm),
             "จำนวน":        qty,
             "ราคาต่อหน่วย": unit_price,
             "ยอดรวมสินค้า": total,
@@ -2076,14 +2133,6 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
         if progress_cb: progress_cb(i, n, fname)
         try:
             pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
-
-            # ── resize รูปใหญ่ให้เล็กลงก่อน ──
-            max_side = 1500
-            w, h = pil.size
-            if max(w, h) > max_side:
-                scale = max_side / max(w, h)
-                pil = pil.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
-
             img_cv = pil_to_cv(pil)
             if auto_detect_multi:
                 sub_crops = auto_crop_receipts(img_cv)

@@ -2307,7 +2307,6 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     )
                     bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
                     items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
-                    items = identify_products_batch_with_search(items)
 
                 else:
                     bill  = extract_receipt(text)
@@ -2824,7 +2823,7 @@ def main():
                             if gemini_result["ok"] and gemini_result["items"]:
                                 bill  = gemini_result["bill"]
                                 items = gemini_result["items"]
-                                items = identify_products_batch_with_search(items)
+                                
                             else:
                                 bill  = extract_receipt(text)
                                 items = extract_items_cj(text)

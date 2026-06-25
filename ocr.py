@@ -1752,7 +1752,7 @@ def _clean_item_name(nm: str) -> str:
     return nm.strip()
 
 
-ddef _merge_gdrive_lines(lines: list) -> list:
+def _merge_gdrive_lines(lines: list) -> list:
     _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
@@ -1761,7 +1761,7 @@ ddef _merge_gdrive_lines(lines: list) -> list:
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)', re.IGNORECASE)
-    _kw_count   = re.compile(r'จ[ํา]?นวนสินค[้า]?[่า]?\s*รวม', re.IGNORECASE)
+    _kw_count   = re.compile(r'จ[ํา]?นวนสินค[้a]?[่a]?\s*รวม', re.IGNORECASE)
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
 

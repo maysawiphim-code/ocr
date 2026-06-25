@@ -1805,22 +1805,28 @@ def extract_items_cj(text: str) -> list:
         if not line: continue
         compact = _collapse(line)
 
-        has_stop = any(k in line or k in compact for k in stop_kw)
-        has_item_pattern = bool(_full.match(lf) or _fb_a.match(lf) or _fb_b.match(lf) or _fb_c.match(lf))
-        if has_stop and not has_item_pattern:
-            break
+        # ── เช็ค skip ก่อน ──
         if re.search(r'จ.{0,3}นวนส', compact): break
         if re.search(r'จ.{0,3}นวนสินค.{0,3}รวม', compact): break
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
-        if re.search(r'-\s*\d+[.,]\d{2}', line): continue
+        if re.match(r'^-\s*\d+[.,]\d{2}', line.strip()): continue  # ส่วนลด (ขึ้นต้นด้วย -)
         if len(line) < 4: continue
 
         line_clean = re.sub(r'^[.\[\]>"\'`*]+\s*', '', line.strip())
         if not line_clean: line_clean = line.strip()
         line_clean = re.sub(r'\s+[Vv]\s*$', '', line_clean).strip()
         lf = _fix_spaced_price(re.sub(r'[\|！｜\[\]]+\s*$', '', line_clean).strip())
+
+        # ── เช็ค stop_kw หลังสร้าง lf แล้ว ──
+        has_stop = any(k in line or k in compact for k in stop_kw)
+        has_item_pattern = bool(
+            _full.match(lf) or _fb_a.match(lf) or
+            _fb_b.match(lf) or _fb_c.match(lf)
+        )
+        if has_stop and not has_item_pattern:
+            break
 
         m = _full.match(lf)
         if m:

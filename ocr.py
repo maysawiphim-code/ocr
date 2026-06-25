@@ -1577,7 +1577,7 @@ def extract_receipt(text: str) -> dict:
         if m:
             candidate = re.sub(r'^\d+\s*[xXP]?\s*', '', line[:m.start()]).strip()
             if len(candidate) >= 2: name = candidate; break
-            pos_machine = _find_pos_machine_id(text, compact) 
+            pos_machine = _find_pos_machine_id(text, compact)
     return {
         "date": date_str, "time": time_val, "branch": branch, "name": name,
         "total_amount": total, "cash": 0.0, "change": 0.0,
@@ -1728,6 +1728,13 @@ def _merge_gdrive_lines(lines: list) -> list:
                         if part: combined += " " + part
                         price_count += 1
                         j += 1
+                    elif re.match(r'^-\s*\d+[.,]\d{2}', nx.strip()):
+                        # "- 50.00" คือราคา ไม่ใช่สินค้า
+                        part = re.sub(r'^-\s*', '', nx.strip())
+                        part = re.sub(r'\s*[Vv]\s*$', '', part).strip()
+                        if part: combined += " " + part
+                        price_count += 1
+                        j += 1
                     elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
                         combined += " " + nx
                         j += 1
@@ -1753,12 +1760,12 @@ def extract_items_cj(text: str) -> list:
     stop_kw = ["ยอดรวม","ยอดราเม","ยอดราม","บอดราม","UORTIN","UORT",
                "รวมทั้งสิ้น",
                "เงินสด","เงินเด","ในสต",
-               "เงินทอน","เงินบน",
+               "เงินทอน","เงินบน","QR ธนาคาร","QRธนาคาร",
                "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า",
                "จํานวนสินค้ารวม","จำนวนสินค้ารวม"]
     skip_kw = ["BNO","8NO","POS","TAX","INCLUDED","ใบเสร็จ","โปรโม",
                "ส่วนลด","แต้ม","แต่ม","ขอบคุณ","สาขา","RECEIPT","INVOICE",
-               "สมาชิก","ID:","QR","User","หวานน้อย","ลดน้ำตาล",
+               "สมาชิก","ID:","หวานน้อย","ลดน้ำตาล",
                "www.","FB:","ร้องเรียน","สมัคร"]
 
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
@@ -2193,6 +2200,7 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
             results.append({"filename": fname,
                             "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
                                      "total_amount":0.0,"cash":0.0,"change":0.0,
+                                     "pos_machine":"ไม่พบ",
                                      "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
                             "items": [], "raw_text": f"[ERROR] {e}", "image": None})
     return results
@@ -2261,7 +2269,7 @@ def run_batch_mode_ui():
                     d['date']        = r1[0].text_input("วันที่",         d['date'],                    key=f"dt{idx}")
                     d['time']        = r1[1].text_input("เวลา",           d['time'],                    key=f"tm{idx}")
                     d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],                  key=f"ps{idx}")
-                    d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''),      key=f"pm{idx}")
+                    d['pos_machine'] = r1[3].text_input("POS ID", d.get('pos_machine', 'ไม่พบ'), key=f"pm{idx}")
                     d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],                 key=f"rc{idx}")
                     tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
                     d['total_amount'] = parse_price(tot_str)

@@ -1254,7 +1254,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "date": "วัน/เดือน/ปี",
   "time": "HH:MM",
   "branch": "ชื่อสาขา",
-  "pos_id": "รหัสสาขา 4 หลัก จาก BNO",
+  "pos_id": "รหัสสาขา 4 หลัก จาก BNO เช่น BNO:S26061416N03 → 1416",
+  "pos_machine": "POS ID เช่น N03",
   "rcpt_no": "เลขที่ใบเสร็จ",
   "total_amount": 0.0,
   "cash": 0.0,
@@ -1275,9 +1276,10 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 กฎสำคัญ:
 - items: รายการสินค้าเท่านั้น ไม่รวมโปรโมชั่น/ส่วนลด/แต้ม/คะแนน AIS
 - ถ้าบรรทัดเดียวมีตัวเลขจำนวนมากกว่า 1 ครั้ง เช่น "1 สินค้า ก 1 สินค้า ข" ให้แยกเป็น 2 items
-- ชื่อสินค้า Bao: ถ้า OCR อ่านผิดเป็น "Beo", "B80", "Be0", "Ba0", "Bo" ให้แก้เป็น "Bao" และจัดหมวดเป็น "Bao Cafe" เสมอ
+- ชื่อสินค้า Bao: ถ้า OCR อ่านผิดเป็น "Beo", "B80", "Be0", "Ba0", "Bo", "Bao.", "Bao_" ให้แก้เป็น "Bao" และจัดหมวดเป็น "Bao Cafe" เสมอ
 - ชื่อสินค้าอื่น: ถ้า OCR อ่านผิดให้เดาจาก context และแก้ให้ถูกต้องที่สุด
-- pos_id: ต้องเป็นตัวเลข 5 หลักของสาขา (เช่น 01275, 01179, 01417)
+- pos_id: ดึงจาก BNO เช่น BNO:S26061416N03 → pos_id = "1416" (4 หลักหลังปี+เดือน)
+- pos_machine: ดึงจาก BNO เช่น BNO:S26061416N03 → pos_machine = "N03"
 - cash/change: เงินสด/เงินทอน
 - ถ้าหาข้อมูลไม่เจอให้ใส่ "" หรือ 0.0
 - ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการเสมอ
@@ -1296,6 +1298,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
             "time":         str(data.get("time", "ไม่พบ")),
             "branch":       str(data.get("branch", "ไม่พบ")),
             "pos_id":       str(data.get("pos_id", "ไม่พบ")),
+            "pos_machine":  str(data.get("pos_machine", "ไม่พบ")),  # ← รับจาก Gemini
             "rcpt_no":      str(data.get("rcpt_no", "ไม่พบ")),
             "total_amount": float(data.get("total_amount", 0)),
             "cash":         0.0,

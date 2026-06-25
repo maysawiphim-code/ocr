@@ -965,7 +965,11 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - Bao_, Beo, B80, Be0, Ba0, Bao. → "Bao" + หมวด "Bao Cafe"
 - โปรโมชั่น/ส่วนลด → ใส่เป็น item หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
 - "1 โปรโมชั่นM 1 แถม 1 Bao" + "-40.00" → item "โปรโมชั่น 1 แถม 1 Bao" ราคา -40.0
-- จำนวนสินค้ารวม N รายการ → ต้องได้ items ครบ N"""
+- "1 โปรโมชั่นM ราคาพิเศษXXบ" + "-XX.00" → item "โปรโมชั่น ราคาพิเศษXXบ" หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
+- "3 โปรโมชั่น2ชิ้น35บ TAO KAE NOI" + "-15.00" → item "โปรโมชั่น 2ชิ้น35บ TAO KAE NOI" ราคา -15.0
+- "+1 วิปปิ้งครีม 15.00 15.00" → สินค้าเสริม ราคา 15.0 หมวด "Bao Cafe"
+- ชื่อสินค้าที่ขึ้นต้นด้วย "+" คือ add-on เครื่องดื่ม Bao → หมวด "Bao Cafe"
+- จำนวนสินค้ารวม N รายการ → ต้องได้ items ครบ N (ไม่นับส่วนลด/โปรโมชั่น)"""
 
     try:
         text_out = _call_gemini(prompt)
@@ -1356,7 +1360,11 @@ def _merge_gdrive_lines(lines: list) -> list:
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)', re.IGNORECASE)
-    _kw_count   = re.compile(r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม', re.IGNORECASE)
+    _kw_count   = re.compile(
+        r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม'  # จำนวนสินค้ารวม variants
+        r'|^[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน]',  # สานานสินค้าราม (standalone)
+        re.IGNORECASE
+    )
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
 
@@ -1376,10 +1384,10 @@ def _merge_gdrive_lines(lines: list) -> list:
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            # ตัด "จำนวนสินค้ารวมXรายการ" และ OCR variants
+            # ตัด "จำนวนสินค้ารวม" และ OCR variants ("สานานสินค้ารามรายการ") ออกจากท้ายบรรทัด
             line = re.sub(
-                r'(?:จ|ส)[ำํา]?[านน]{1,2}[วน]?[านน]สินค[้า]?[่า]?\s*ร[วา]ม\S*รายการ',
-                '', line
+                r'\s*[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$', '',
+                line, flags=re.IGNORECASE
             ).strip()
             line = re.sub(r'สา[นม]านสินค[้า]?ราม\S*', '', line).strip()
             # ตัด note ท้ายชื่อสินค้า
@@ -1461,11 +1469,16 @@ def _merge_gdrive_lines(lines: list) -> list:
         for l in lines:
             s = l.strip()
             if not s: continue
-            if _kw_amount.search(s):
+            _kw_am_sm = re.compile(
+                r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม',
+                re.IGNORECASE)
+            if _kw_am_sm.search(s):
+                # flush สินค้าที่ค้างอยู่ก่อน break
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
-                    cur_name = None; prices_buf = []
-                items_merged.append(s)
+                elif cur_name:
+                    items_merged.append(cur_name)
+                cur_name = None; prices_buf = []
                 break
             if _kw_count.search(s): continue
             if _skip_note.match(s): continue
@@ -1487,8 +1500,10 @@ def _merge_gdrive_lines(lines: list) -> list:
                     items_merged.append(f"{cur_name} {prices_buf[0]} {prices_buf[1]}")
                     cur_name = None; prices_buf = []
                 in_items = True
-            elif (_item_start.match(s) or (_has_thai.search(s)
-                  and not _skip_hdr.search(s) and not _DATE_RE3.match(s))):
+            elif not _DATE_RE3.match(s) and (
+                    _item_start.match(s) or
+                    (_has_thai.search(s) and not _skip_hdr.search(s))
+                ):
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
                 elif cur_name:
@@ -1498,13 +1513,14 @@ def _merge_gdrive_lines(lines: list) -> list:
                     items_merged.append(s)
                     in_items = True
                 elif re.match(r'^ส่วนลด\s*$', s):
-                    # "ส่วนลด" บรรทัดเดียว → รอราคาติดลบจาก is_neg ถัดไป (ข้ามบรรทัดนี้)
                     in_items = True
                 elif not in_items and _skip_hdr.search(s):
                     header_lines.append(s)
                 else:
-                    cur_name = _strip_note(s)
-                    in_items = True
+                    stripped = _strip_note(s)
+                    if stripped:
+                        cur_name = stripped
+                        in_items = True
             else:
                 if not in_items:
                     header_lines.append(s)
@@ -1606,11 +1622,16 @@ def extract_items_cj(text: str) -> list:
             # normalize OCR ผิด: ไม่มีวรรณยุกต์
             line = re.sub(r'\bสวนลด\b', 'ส่วนลด', line)
             line = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', line)
+            # ตัด "สานานสินค้ารามรายการ" suffix ออกจากชื่อสินค้า
+            line = re.sub(
+                r'\s*[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$', '',
+                line, flags=re.IGNORECASE
+            ).strip()
             compact = _collapse(line)
 
             if re.search(r'จ[าำ]?นวนสินค[้า]?[่า]?\s*รวม', line): break  # จำนวนสินค้ารวม
             if re.search(r'จ.{0,3}นวนสินค.{0,3}รวม', compact): break
-            if re.search(r'สา[นม]านสินค', compact): break
+            if re.search(r'สา[นม]านสินค|สานานสินค', compact): break
             if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
             if any(k.lower() in compact.lower() for k in skip_kw): continue
             if _RE_DATE.search(line): continue
@@ -1704,28 +1725,74 @@ def build_excel(all_bills: list) -> bytes:
         rows = []
         for b in all_bills:
             d = b['bill']
-            base = {"ไฟล์":b['filename'],"วันที่":d['date'],"เวลา":d['time'],
-                    "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],
-                    "POS ID":d.get('pos_machine',''),
-                    "เลขที่ใบเสร็จ":d['rcpt_no']}
+            base = {
+                "ไฟล์":           b['filename'],
+                "วันที่":          d['date'],
+                "เวลา":           d['time'],
+                "สาขา":           d['branch'],
+                "รหัสสาขา":       d['pos_id'],
+                "POS ID":         d.get('pos_machine',''),
+                "เลขที่ใบเสร็จ":  d['rcpt_no'],
+            }
             items = b['items'] or []
             for it in items:
-                cat = BAO_CAFE_CATEGORY if _is_bao_item(it.get("ชื่อสินค้า","")) \
-                      else (it.get("หมวดหมู่") or "สินค้าเบ็ดเตล็ดอื่นๆ")
+                name = it.get("ชื่อสินค้า", "")
+                cat  = BAO_CAFE_CATEGORY if _is_bao_item(name) \
+                       else (it.get("หมวดหมู่") or "สินค้าเบ็ดเตล็ดอื่นๆ")
+                unit_price = it.get("ราคาต่อหน่วย", 0)
+                total_amt  = it.get("ยอดรวมสินค้า", 0)
+                is_disc = (cat == "ส่วนลด/โปรโมชั่น"
+                           or re.search(r'ส่วนลด|โปรโมชั่น|โปรโม|discount|promotion',
+                                        name, re.IGNORECASE))
                 row = base.copy()
-                row.update({"ชื่อสินค้า":   it.get('ชื่อสินค้า',''),
-                            "หมวดหมู่":     cat,
-                            "จำนวน":        it.get('จำนวน',1),
-                            "ราคาต่อหน่วย": it.get('ราคาต่อหน่วย',0),
-                            "ยอดรวมสินค้า": it.get('ยอดรวมสินค้า',0),
-                            "ยอดรวม":       ""})
+                if is_disc:
+                    row.update({
+                        "ชื่อสินค้า":        "",
+                        "หมวดหมู่":          "",
+                        "จำนวน":             "",
+                        "ราคาต่อหน่วย":      "",
+                        "ยอดรวมสินค้า":      "",
+                        "ยอดรวม":            "",
+                        "ชื่อส่วนลด/โปรโม":  name,
+                        "มูลค่าส่วนลด":      total_amt if total_amt <= 0 else -abs(total_amt),
+                    })
+                else:
+                    row.update({
+                        "ชื่อสินค้า":        name,
+                        "หมวดหมู่":          cat,
+                        "จำนวน":             it.get("จำนวน", 1),
+                        "ราคาต่อหน่วย":      unit_price,
+                        "ยอดรวมสินค้า":      total_amt,
+                        "ยอดรวม":            "",
+                        "ชื่อส่วนลด/โปรโม":  "",
+                        "มูลค่าส่วนลด":      "",
+                    })
                 rows.append(row)
+            # summary row
             summary = base.copy()
-            summary.update({"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":"",
-                            "ราคาต่อหน่วย":"","ยอดรวมสินค้า":"",
-                            "ยอดรวม":d['total_amount']})
+            summary.update({
+                "ชื่อสินค้า":       "",
+                "หมวดหมู่":         "",
+                "จำนวน":            "",
+                "ราคาต่อหน่วย":     "",
+                "ยอดรวมสินค้า":     "",
+                "ยอดรวม":           d['total_amount'],
+                "ชื่อส่วนลด/โปรโม": "",
+                "มูลค่าส่วนลด":     "",
+            })
             rows.append(summary)
-        pd.DataFrame(rows).to_excel(writer, index=False, sheet_name='ใบเสร็จ')
+        # column order
+        cols = ["ไฟล์","วันที่","เวลา","สาขา","รหัสสาขา","POS ID","เลขที่ใบเสร็จ",
+                "ชื่อสินค้า","หมวดหมู่","จำนวน","ราคาต่อหน่วย","ยอดรวมสินค้า",
+                "ชื่อส่วนลด/โปรโม","มูลค่าส่วนลด","ยอดรวม"]
+        df = pd.DataFrame(rows, columns=cols)
+        df.to_excel(writer, index=False, sheet_name='ใบเสร็จ')
+        # จัด column width
+        ws = writer.sheets['ใบเสร็จ']
+        widths = [20,12,8,20,10,8,22, 28,18,6,12,12, 28,12,10]
+        for i, w in enumerate(widths, 1):
+            from openpyxl.utils import get_column_letter
+            ws.column_dimensions[get_column_letter(i)].width = w
     return output.getvalue()
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -1078,21 +1078,24 @@ def categorize_items_batch(items: list) -> list:
     return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ"
             for bao in pre_assigned]
 def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
-    """ให้ Gemini แยก N บิลจาก raw text เดียวที่มีหลายบิลรวมกัน"""
-    prompt = f"""นี่คือข้อความจากรูปภาพที่มี {n_bills} ใบเสร็จเคียงกัน อ่านด้วย Google Drive OCR:
+    prompt = f"""นี่คือข้อความจากรูปภาพที่มี {n_bills} ใบเสร็จเคียงกัน อ่านด้วย Google Drive OCR
+OCR อาจอ่านผิดและข้อมูล 2 บิลอาจสลับปนกัน:
 
 {raw_text}
 
-กรุณาแยกข้อมูลออกเป็น {n_bills} ใบเสร็จ และดึงข้อมูลแต่ละใบออกมา
-
-กฎสำคัญ:
-- แต่ละบิลจะมี BNO: และ ID:E เป็นของตัวเอง ใช้เป็นจุดแบ่งบิล
+กฎสำคัญในการแยกบิล:
+- แต่ละบิลมี BNO: หรือ BNO. เป็นของตัวเอง ใช้เป็นจุดแบ่งหลัก
+- แต่ละบิลมี ID-E หรือ ID: เป็นของตัวเอง
+- แต่ละบิลมีวันที่+เวลาเป็นของตัวเอง
+- OCR อาจอ่าน "BNO:" เป็น "BNO." หรือ "BNO $" — ถือว่าเป็น BNO เหมือนกัน
+- OCR อาจอ่าน "$" หรือ "£" แทน "S" ใน BNO เช่น "BNO $26061416N04" → "BNO:S26061416N04"
 - pos_id: ดึงจาก BNO เช่น BNO:S26061416N03 → pos_id = "1416"
-- OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo", "Bao.", "Bao_" → แปลงเป็น "Bao" เสมอ
-- "หวานน้อย" "หวานปกติ" "ไม่หวาน" คือ note ไม่ใช่สินค้า ข้ามไป
+- pos_machine: ดึงจาก BNO เช่น BNO:S26061416N03 → pos_machine = "N03"
+- OCR อ่านชื่อ Bao ผิดเป็น "Bao.", "Bao_", "Bac", "Bav", "Beo" → แปลงเป็น "Bao" เสมอ
+- "ไม่หวาน" "หวานน้อย" "หวานปกติ" คือ note ไม่ใช่สินค้า
 - ส่วนลด "-40.00" ให้ใส่เป็น item ชื่อ "ส่วนลด" ราคาติดลบ
   เช่น {{"ชื่อสินค้า":"ส่วนลด","หมวดหมู่":"ส่วนลด/โปรโมชั่น","จำนวน":1,"ราคาต่อหน่วย":-40.0,"ยอดรวมสินค้า":-40.0}}
-- ถ้า OCR รวม 2 บิลเป็น text เดียวกัน ให้แยกตาม BNO และ ID:E
+- ถ้า OCR อ่านวันที่ผิด เช่น "18/06/2028" → แก้เป็น "18/06/2026"
 
 {BAO_CAFE_MENU}
 {CJ_PRODUCT_KNOWLEDGE}
@@ -1106,7 +1109,7 @@ def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
     "branch": "ชื่อสาขา",
     "pos_id": "รหัสสาขา 4 หลัก",
     "pos_machine": "NXX",
-    "rcpt_no": "เลขที่ใบเสร็จ",
+    "rcpt_no": "เลขที่ใบเสร็จ เช่น S26061416N04-004135",
     "total_amount": 0.0,
     "items": [
       {{
@@ -1121,7 +1124,7 @@ def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
 ]"""
 
     try:
-        raw = _call_gemini(prompt, max_tokens=2000)
+        raw = _call_gemini(prompt, max_tokens=3000)  # ← เพิ่ม max_tokens
         raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
         bills_raw = json.loads(raw)
         if not isinstance(bills_raw, list):
@@ -1129,8 +1132,13 @@ def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
 
         results = []
         for bd in bills_raw[:n_bills]:
+            # แก้วันที่ผิด
+            date_str = str(bd.get("date", "ไม่พบ"))
+            date_str = re.sub(r'/202[7-9]/', '/2026/', date_str)
+            date_str = re.sub(r'/20[3-9]\d/', '/2026/', date_str)
+
             bill = {
-                "date":         str(bd.get("date", "ไม่พบ")),
+                "date":         date_str,
                 "time":         str(bd.get("time", "ไม่พบ")),
                 "branch":       str(bd.get("branch", "ไม่พบ")),
                 "pos_id":       str(bd.get("pos_id", "ไม่พบ")),
@@ -1157,7 +1165,6 @@ def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
                 })
             results.append({"bill": bill, "items": items})
 
-        # ถ้า Gemini คืนน้อยกว่า n_bills ให้เติม empty bill
         while len(results) < n_bills:
             results.append({
                 "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ",
@@ -1167,6 +1174,20 @@ def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
                 "items": []
             })
         return results
+
+    except Exception as e:
+        # fallback แยกทีละบิลด้วย extract_with_gemini
+        single = extract_with_gemini(raw_text, ocr_source="gdrive")
+        result = [{"bill": single["bill"], "items": single["items"]}] if single["ok"] else []
+        while len(result) < n_bills:
+            result.append({
+                "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ",
+                         "pos_id":"ไม่พบ","pos_machine":"ไม่พบ","rcpt_no":"ไม่พบ",
+                         "total_amount":0.0,"cash":0.0,"change":0.0,
+                         "tax_id":"ไม่พบ","user":"ไม่พบ","name":"ไม่พบ"},
+                "items": []
+            })
+        return result
 
     except Exception as e:
         # fallback: ใช้ extract_with_gemini ปกติสำหรับแต่ละบิล
@@ -1419,9 +1440,12 @@ def _fix_date(d: str) -> str:
         if yr[0] not in ('1','2'): yr = '2' + yr[1:]
         if int(yr) > 2500: yr = str(int(yr) - 543)
         yr_int = int(yr) if yr.isdigit() else 0
-        if not (2020 <= yr_int <= 2035) and len(yr) == 4:
+        # ── เพิ่ม: แก้ปีที่ OCR อ่านผิด เช่น 2028 → 2026 ──
+        if yr_int > 2026:
+            yr = '2026'
+        elif not (2020 <= yr_int <= 2026):
             candidate = '202' + yr[3]
-            if candidate.isdigit() and 2020 <= int(candidate) <= 2035:
+            if candidate.isdigit() and 2020 <= int(candidate) <= 2026:
                 yr = candidate
     elif len(yr) == 2:
         yr = '20' + yr

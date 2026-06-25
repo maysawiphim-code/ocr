@@ -1514,42 +1514,41 @@ def _find_pos_machine_id(text: str, compact: str) -> str:
     """ดึง POS ID เช่น N02 จาก BNO:S26062221N02-002492"""
     for line in text.split('\n'):
         c = _collapse(line)
-        m = re.search(r'(?:BNO|8NO|BN0)[:\s]*[A-Z]\d{8}([A-Z]\d{2,3})-', c, re.IGNORECASE)
+        m = re.search(r'(?:BNO|8NO|BN0)[:\s.]*[A-Z]\d{8}([A-Z]\d{2,3})-', c, re.IGNORECASE)
         if m: return m.group(1)
     m = re.search(r'POS\s*[:\s]+([A-Z]\d{2,3})', compact, re.IGNORECASE)
     if m: return m.group(1)
     return "ไม่พบ"
 
 def _find_pos_id(text: str, compact: str, lines: list) -> str:
-    # 1. BNO: S + ปี(2) + เดือน(2) + สาขา(4) + N...
+    # 1. BNO — รองรับทั้ง BNO: และ BNO.
     for line in text.split('\n'):
         c = _collapse(line)
-        m = re.search(r'(?:BNO|8NO|BN0)[:\s]*[A-Z]\d{4}(\d{4})[A-Z]\d+', c, re.IGNORECASE)
+        m = re.search(r'(?:BNO|8NO|BN0)[:\s.]*[A-Z]\d{4}(\d{4})[A-Z]\d+', c, re.IGNORECASE)
         if m: return m.group(1)
-    # 2. keyword สาขา
+    # 2. keyword สาขา — skip บรรทัดที่มี TAXID
     _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
     for line in lines[:12]:
         c = _collapse(line)
+        if re.search(r'TAXID|TAX\s*ID|0105556', c, re.IGNORECASE): continue
         m = re.search(_BRANCH_KW + r'[^\d]{0,4}(0?\d{4,5})', c, re.IGNORECASE)
         if m: return m.group(1)
     for line in lines[:12]:
         c = _collapse(line)
+        if re.search(r'TAXID|TAX\s*ID|0105556', c, re.IGNORECASE): continue
         if re.search(r'มอร์|มอร|เจเอ|CJ|MORE', line, re.IGNORECASE) or 'มอร์' in c:
             nums = re.findall(r'0?\d{4,5}(?!\d)', c)
             if nums: return nums[0]
     m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{4,5})', compact, re.IGNORECASE)
     if m: return m.group(1)
-    nums_all = re.findall(r'(?<!\d)0?\d{4,5}(?!\d)', compact)
-    if nums_all: return nums_all[0]
-    # POS fallback ต่ำสุด
+    # fallback — แต่ข้าม TAXID
     for line in lines[:10]:
         c = _collapse(line)
+        if re.search(r'TAXID|TAX\s*ID|0105556', c, re.IGNORECASE): continue
         m = re.search(r'POS\s*[.\s]*NO\s*S?\s*(\d{1,2})\b', c, re.IGNORECASE)
         if m: return f"NO{m.group(1)}"
         m = re.search(r'POS\s*(?:ID|:)?\s*#?\s*([A-Za-z]\d{1,3})(?!\d)', c, re.IGNORECASE)
         if m: return m.group(1)
-    m = re.search(r'\((\d{4,})\)', compact)
-    if m: return m.group(1)
     return "ไม่พบ"
 
 
@@ -1796,9 +1795,15 @@ def _merge_gdrive_lines(lines: list) -> list:
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            # ตัด "จำนวนสินค้ารวมXรายการ" ออกจากท้ายบรรทัด
+            # ตัด "จำนวนสินค้ารวมXรายการ", "สานานสินค้ารามรายการ", "สำนานสินค้ารวมรายการ" ออก
             line = re.sub(
-                r'จ[ํา]?นวนสินค[้า]?[่า]?\s*รวม[^บ]*รายการ', '', line
+                r'(?:จ|ส)[ำํา]?[านน]{1,2}[วน]?[านน]สินค[้า]?[่า]?\s*ร[วา]ม\S*รายการ',
+                '', line
+            ).strip()
+            # ตัด pattern สั้นกว่า เช่น "สานานสินค้าราม" โดยไม่มี "รายการ"
+            line = re.sub(
+                r'สา[นม]านสินค[้า]?ราม\S*',
+                '', line
             ).strip()
             if _kw_amount.search(line) and not _RE_PRICE.search(line):
                 j = i + 1
@@ -1990,6 +1995,7 @@ def extract_items_cj(text: str) -> list:
         # ── เช็ค skip ก่อน ──
         if re.search(r'จ.{0,3}นวนส', compact): break
         if re.search(r'จ.{0,3}นวนสินค.{0,3}รวม', compact): break
+        if re.search(r'สา[นม]านสินค', compact): break
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue

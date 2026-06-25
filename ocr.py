@@ -2050,6 +2050,18 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
             pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
             img_cv = pil_to_cv(pil)
 
+            # ── ตรวจสอบความชัด ──
+            _gray_b = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            _blur_b = cv2.Laplacian(_gray_b, cv2.CV_64F).var()
+            if _blur_b < 20:  # ไม่ชัดมาก → skip OCR
+                results.append({"filename": fname,
+                    "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
+                             "total_amount":0.0,"cash":0.0,"change":0.0,"pos_machine":"ไม่พบ",
+                             "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
+                    "items": [], "raw_text": f"[รูปไม่ชัด blur={_blur_b:.0f}]",
+                    "image": img_to_bytes_png(img_cv), "blurry": True})
+                continue
+
             if ocr_engine == "gdrive" and bills_per_image > 1:
                 thumb_crops = split_receipts_image(img_cv, n_expected=bills_per_image)
                 if len(thumb_crops) < bills_per_image:
@@ -2144,8 +2156,15 @@ def run_batch_mode_ui():
         for ci, (fname, fbytes) in enumerate(chunk):
             with cols[ci]:
                 try:
-                    st.image(Image.open(io.BytesIO(fbytes)), use_container_width=True,
+                    pil_t = Image.open(io.BytesIO(fbytes))
+                    st.image(pil_t, use_container_width=True,
                               caption=fname[:16] + ('…' if len(fname)>16 else ''))
+                    # blur check
+                    cv_t = pil_to_cv(pil_t)
+                    gray_t = cv2.cvtColor(cv_t, cv2.COLOR_BGR2GRAY)
+                    blur_t = cv2.Laplacian(gray_t, cv2.CV_64F).var()
+                    if blur_t < 30:
+                        st.caption("⚠️ รูปไม่ชัด")
                 except Exception:
                     st.warning(fname[:16])
     st.divider()
@@ -2199,45 +2218,60 @@ def run_batch_mode_ui():
 
 def _render_bills_ui(all_bills, key_prefix=""):
     st.success(t("found")(len(all_bills)))
+    # แสดงรายชื่อไฟล์รูปไม่ชัด
+    blurry_files = [b["filename"] for b in all_bills if b.get("blurry")]
+    if blurry_files:
+        st.error(
+            "⚠️ **รูปต่อไปนี้ไม่ชัด — ไม่สามารถ OCR ได้:**\n"
+            + "\n".join(f"• {f}" for f in blurry_files),
+            icon="📷"
+        )
+
     for idx, b in enumerate(all_bills):
-        with st.expander(f"📄 {b['filename']}", expanded=True):
-            ic, dc = st.columns([1,2])
-            with ic:
-                if b.get('image'): st.image(b['image'], use_container_width=True)
-            with dc:
-                d = b['bill']
-                st.markdown("**ตรวจสอบ / แก้ไข**")
-                r1 = st.columns(5)
-                d['date']        = r1[0].text_input("วันที่",         d['date'],               key=f"{key_prefix}dt{idx}")
-                d['time']        = r1[1].text_input("เวลา",           d['time'],               key=f"{key_prefix}tm{idx}")
-                d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],             key=f"{key_prefix}ps{idx}")
-                d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''), key=f"{key_prefix}pm{idx}")
-                d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],            key=f"{key_prefix}rc{idx}")
-                tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"{key_prefix}tot{idx}")
-                d['total_amount'] = parse_price(tot_str)
-            st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
-            if b['items']:
-                st.markdown("**🛒 รายการสินค้า**")
-                items_display = b['items'].copy()
-                for i, it in enumerate(items_display):
-                    if _is_bao_item(it.get("ชื่อสินค้า", "")):
-                        items_display[i] = {**it, "หมวดหมู่": BAO_CAFE_CATEGORY}
-                    elif not it.get("หมวดหมู่"):
-                        items_display[i] = {**it, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}
-                st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
+        is_blurry = b.get("blurry", False)
+        label_icon = "📷" if is_blurry else "📄"
+        with st.expander(f"{label_icon} {b['filename']}" + (" — รูปไม่ชัด" if is_blurry else ""), expanded=not is_blurry):
+            if is_blurry:
+                st.error("⚠️ รูปนี้ไม่ชัดเกินไป — กรุณาถ่ายรูปใหม่ให้ชัดขึ้น")
+                if b.get("image"): st.image(b["image"], width=200)
             else:
-                st.info(t("no_items"))
-            with st.expander(f"🔬 {t('raw_text')} + debug"):
-                gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
-                if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
-                    st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
-                    st.text_area("Google Doc raw", gdrive_raws[idx], height=200,
-                                 key=f"{key_prefix}gdraw{idx}", disabled=True)
-                    st.markdown("---")
-                    st.markdown("**🧹 หลัง clean_text**")
-                st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160,
-                             key=f"{key_prefix}raw{idx}", disabled=True)
-                st.json({k:v for k,v in b['bill'].items()})
+                ic, dc = st.columns([1,2])
+                with ic:
+                    if b.get('image'): st.image(b['image'], use_container_width=True)
+                with dc:
+                    d = b['bill']
+                    st.markdown("**ตรวจสอบ / แก้ไข**")
+                    r1 = st.columns(5)
+                    d['date']        = r1[0].text_input("วันที่",         d['date'],               key=f"{key_prefix}dt{idx}")
+                    d['time']        = r1[1].text_input("เวลา",           d['time'],               key=f"{key_prefix}tm{idx}")
+                    d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],             key=f"{key_prefix}ps{idx}")
+                    d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''), key=f"{key_prefix}pm{idx}")
+                    d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],            key=f"{key_prefix}rc{idx}")
+                    tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"{key_prefix}tot{idx}")
+                    d['total_amount'] = parse_price(tot_str)
+                st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
+                if b['items']:
+                    st.markdown("**🛒 รายการสินค้า**")
+                    items_display = b['items'].copy()
+                    for i, it in enumerate(items_display):
+                        if _is_bao_item(it.get("ชื่อสินค้า", "")):
+                            items_display[i] = {**it, "หมวดหมู่": BAO_CAFE_CATEGORY}
+                        elif not it.get("หมวดหมู่"):
+                            items_display[i] = {**it, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}
+                    st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
+                else:
+                    st.info(t("no_items"))
+                with st.expander(f"🔬 {t('raw_text')} + debug"):
+                    gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
+                    if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
+                        st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
+                        st.text_area("Google Doc raw", gdrive_raws[idx], height=200,
+                                     key=f"{key_prefix}gdraw{idx}", disabled=True)
+                        st.markdown("---")
+                        st.markdown("**🧹 หลัง clean_text**")
+                    st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160,
+                                 key=f"{key_prefix}raw{idx}", disabled=True)
+                    st.json({k:v for k,v in b['bill'].items()})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN UI
@@ -2427,7 +2461,7 @@ def main():
             st.info(t("crop_hint"))
         with crop_col:
             st_html(crop_component_html(pil_orig, mode_key, bill_count=S.bill_count),
-                height=440 if S.bill_count > 1 else 400, scrolling=False)
+                height=360 if S.bill_count > 1 else 320, scrolling=False)
 
         st.markdown("**📋 วางข้อมูล Crop ที่คัดลอกจากด้านบน:**")
         paste_col, btn_col = st.columns([4,1])
@@ -2492,15 +2526,60 @@ def main():
 
     if working_pil:
         st.divider()
-        prev_c, ocr_c = st.columns([1,2])
-        with prev_c:
-            st.image(working_pil, caption="รูปที่จะวิเคราะห์", use_container_width=True)
-        with ocr_c:
-            engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
-                            "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
-            st.caption(f"OCR Engine: **{engine_label}**")
+        img_cv_preview = pil_to_cv(working_pil)
 
-            if st.button(t("analyze"), use_container_width=True, type="primary"):
+        # ── ตรวจสอบความชัดของรูป ──
+        def _check_blur(img_cv):
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            lap = cv2.Laplacian(gray, cv2.CV_64F).var()
+            return lap
+
+        blur_score = _check_blur(img_cv_preview)
+        IS_BLURRY = blur_score < 30  # threshold
+
+        # ── Preview รูป (เล็กลง) + crop previews ──
+        fname_active = (S.gallery_files[S.selected_idx][0]
+                        if 0 <= S.selected_idx < len(S.gallery_files) else "image")
+
+        if S.bill_count > 1:
+            # แสดง crop preview ก่อนกดวิเคราะห์
+            if S.manual_splits_px:
+                preview_crops = split_by_positions(img_cv_preview, S.manual_splits_px)
+            else:
+                preview_crops = split_receipts_image(img_cv_preview, n_expected=S.bill_count)
+            if len(preview_crops) < S.bill_count:
+                preview_crops = preview_crops + [img_cv_preview] * (S.bill_count - len(preview_crops))
+            preview_crops = preview_crops[:S.bill_count]
+
+            st.markdown(f"**✂️ ตัดออกมาได้ {len(preview_crops)} บิล — ตรวจสอบก่อนวิเคราะห์:**")
+            prev_cols = st.columns(len(preview_crops))
+            for ci, crop_cv in enumerate(preview_crops):
+                with prev_cols[ci]:
+                    crop_blur = _check_blur(crop_cv)
+                    crop_pil = cv_to_pil(crop_cv)
+                    st.image(crop_pil, caption=f"บิล {ci+1}", use_container_width=True)
+                    if crop_blur < 30:
+                        st.warning("⚠️ รูปไม่ชัด", icon="⚠️")
+        else:
+            # 1 บิล: preview เล็กๆ
+            col_img, col_info = st.columns([1, 3])
+            with col_img:
+                st.image(working_pil, width=160, caption=fname_active[:20])
+            with col_info:
+                engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
+                                "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
+                st.caption(f"Engine: **{engine_label}**")
+                if IS_BLURRY:
+                    st.error(f"⚠️ **รูปไม่ชัด** (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
+
+        engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
+                        "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
+        if S.bill_count == 1:
+            st.caption(f"Engine: **{engine_label}** | blur score: {blur_score:.0f}")
+        else:
+            st.caption(f"Engine: **{engine_label}**")
+
+        if st.button(t("analyze"), use_container_width=True, type="primary"):
                 with st.spinner("กำลัง OCR..."):
                     img_cv = pil_to_cv(working_pil)
                     all_bills = []

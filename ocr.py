@@ -838,7 +838,7 @@ def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
 กฎ:
 - แต่ละบิลมี BNO: หรือ BNO. เป็นของตัวเอง
 - OCR อาจอ่าน "$" แทน "S" ใน BNO
-- pos_id: จาก BNO เช่น BNO:S26061416N03 → "1416"
+- pos_id: ดึงจาก BNO format S+ปี(2)+เดือน(2)+สาขา(4)+N เช่น BNO:S26061326N03 → pos_id = "1326"
 - pos_machine: จาก BNO เช่น N03
 - Bao_, Beo, B80, Bac → "Bao" เสมอ
 - "ไม่หวาน" "หวานน้อย" คือ note ไม่ใช่สินค้า
@@ -907,23 +907,57 @@ def extract_items_with_gemini(raw_text: str) -> list:
 
 def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
     if ocr_source == "gdrive":
-        format_hint = """รูปแบบ Google Drive OCR:
-- บรรทัด 1: จำนวน ชื่อสินค้า
-- บรรทัด 2: ราคาต่อหน่วย
-- บรรทัด 3: ราคารวม V
+        format_hint = """รูปแบบข้อมูล (Google Drive OCR แยกราคาเป็นบรรทัดใหม่):
+- บรรทัด 1: จำนวน ชื่อสินค้า  (เช่น "1 Bao ลาเต้เย็น" หรือ "1 PFPเต้าหู้ 120g")
+- บรรทัด 2: ราคาต่อหน่วย  (เช่น "40.00")
+- บรรทัด 3: ราคารวม V  (เช่น "40.00 V" หรือ "40.00 - V" หรือ "80.00 V")
 
-กฎพิเศษ:
-- "หวานน้อย" "ไม่หวาน" คือ note ข้ามไป
-- "Bao_อเมริกาโน่เป็น" → "Bao อเมริกาโน่เย็น"
-- "1 โปรโมชั่นM 1 แถม 1 Bao" คือโปรโมชั่น → item ชื่อ "โปรโมชั่น 1 แถม 1 Bao" หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
-- ส่วนลด "-40.00" → item "ส่วนลด" ราคาติดลบ
-- pos_id จาก BNO: BNO:S26061416N03 → "1416"
-- pos_machine จาก BNO: N03"""
+กรณีพิเศษที่พบบ่อย:
+- "- 50.00" หรือ "40.00 - V" คือราคาของสินค้าบรรทัดก่อนหน้า ไม่ใช่ส่วนลด
+- "หวานน้อย" "หวานปกติ" "ไม่หวาน" คือ note ข้ามไป ไม่ใช่สินค้า (อาจอยู่หลังราคาก็ได้)
+- "-" หน้าชื่อสินค้าหมายถึงจำนวน 1
+- บรรทัดที่มี "จํานวนสินค้ารวมXรายการ" ติดท้ายชื่อสินค้า ให้ตัดส่วนนั้นทิ้ง
+  เช่น "1 Bao อาราบีก้า 45.00 จํานวนสินค้ารวมๆรายการ" → ชื่อ "Bao อาราบีก้า" ราคา 45.00
+- OCR อาจรวมสินค้า 2 รายการไว้บรรทัดเดียว เช่น "1 สกินแม็บยาสีฟัน 1 Bigsmileแปรงคนจัดฟัน จานวนสินค้ารวม2รายการ"
+  → แยกเป็น 2 items ราคาจับคู่ตามลำดับ: สินค้า 1 → ราคาชุดแรก, สินค้า 2 → ราคาชุดที่ 2
+- OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo", "Bao_", "Bao.", "Bac" → แปลงเป็น "Bao" เสมอ
+- ส่วนลด: บรรทัด "-40.00", "-20.00", "-16.00" ฯลฯ ให้ใส่เป็น item ชื่อ "ส่วนลด" ราคาติดลบ
+  เช่น {{"ชื่อสินค้า":"ส่วนลด","หมวดหมู่":"ส่วนลด/โปรโมชั่น","จำนวน":1,"ราคาต่อหน่วย":-40.0,"ยอดรวมสินค้า":-40.0}}
+- ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการ (ไม่นับส่วนลด)
+- pos_id: ดึงจาก BNO เช่น BNO:S26061326N03 → pos_id = "1326", BNO:S26060707N01 → pos_id = "0707"
+- ชื่อสินค้าที่ OCR อ่านผิดให้แก้เปรียบเทียบกับสินค้าในร้านสะดวกซื้อไทย:
+  "ขาไทยเป็น/เย็น" → "ชาไทยเย็น", "ขาเขียวนมสด" → "ชาเขียวนมสด"
+  "กาแฟบาวเป็น" → "Bao กาแฟ", "เอสเปรสโซ่เป็น" → "เอสเปรสโซ่เย็น"
+  "เปาผงซักฟอก" → "เปา ผงซักฟอก", "เล คลาส คออริจินอล" → "เลย์คลาสสิค ออริจินอล"
+  "เลยคลาสสดรสโนริ" → "เลย์คลาสสิค รสโนริสาหร่าย"
+  "หากเก่นนมเปรี้ยว" → "ยาคูลท์นมเปรี้ยว", "เลิฟโทนเลิฟชาโยคา" → "เลิฟโพชั่น ชาโยคา"
+  "TGMคอทเทจ เบค่อน" → "TGM คอทเทจ เบคอน", "เกาลูนส้นแก้วสาหร่าย" → "เกาลูน สาหร่ายทะเล"
+  "ดราช่างเทปลบ" → "ดราช่าง เทปลบคำผิด", "MBLรองฟัน" → "MBL ฟลอสขัดฟัน"
+  "เกลดเจลลาเวน" → "เจลลาเวนเดอร์", "สมูทอีเจลแต้มสิว" → "สมูทอี เจลแต้มสิว"
+  "คูลคูลเฟรช" → "คูลคูล เฟรช น้ำมะพร้าว"
+  "วอลสท็อปเท็นช็อก" → "Walltop ช็อกโกแลต"
+  "เซนได กาจ่อปลวก" → "เซนได กำจัดปลวก"
+  "PFPเต้าหู้" → "PFP เต้าหู้แข็ง"
+  "อิชิตันน้าต่าง พีเอ" → "อิชิตัน น้ำตาง พลัส"
+  "เอ ฟรีซดรายกล้วย" → "A-Freeze กล้วยอบกรอบ"
+  "เรนเจอร์ยาจดกันยุงควัน" → "เรนเจอร์ ยากันยุงแบบจุด"
+  "เคเอฟไข่ไก่" → "ไข่ไก่ขนาดกลาง"
+  "นํ้าทิพยนาดิม" → "น้ำทิพย์ ขนาด 1500ml" """
     else:
-        format_hint = """รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม
-- ส่วนลด "-40.00" → item "ส่วนลด" ราคาติดลบ
-- โปรโมชั่น → item หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
-- pos_id จาก BNO"""
+        format_hint = """รูปแบบข้อมูล (แต่ละสินค้าอยู่บรรทัดเดียว):
+- รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม  (เช่น "1 คาราบาวแดง 12.00 12.00")
+- หรือ: จำนวน ชื่อสินค้า ราคา  (เช่น "2 น้ำดื่ม 10.00 20.00")
+- OCR อาจรวมสินค้า 2 รายการและ "จำนวนสินค้ารวมXรายการ" ไว้บรรทัดเดียว → แยกเป็น 2 items
+- "- 50.00" หรือ "40.00 - V" คือราคาของสินค้าบรรทัดก่อนหน้า ไม่ใช่ส่วนลด
+- ส่วนลด: "-40.00", "-20.00" ฯลฯ ให้ใส่เป็น item ชื่อ "ส่วนลด" ราคาติดลบ
+  เช่น {{"ชื่อสินค้า":"ส่วนลด","หมวดหมู่":"ส่วนลด/โปรโมชั่น","จำนวน":1,"ราคาต่อหน่วย":-40.0,"ยอดรวมสินค้า":-40.0}}
+- OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo", "Bao_", "Bac" → แปลงเป็น "Bao" เสมอ
+- ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการ (ไม่นับส่วนลด)
+- pos_id: ดึงจาก BNO เช่น BNO:S26061326N03 → pos_id = "1326"
+- ชื่อสินค้าที่ OCR อ่านผิดให้แก้เปรียบเทียบกับสินค้าในร้านสะดวกซื้อไทย:
+  "ขาไทยเป็น" → "ชาไทยเย็น", "เอสเปรสโซ่เป็น" → "เอสเปรสโซ่เย็น"
+  "เลย์คลาสลิค" → "เลย์คลาสสิค", "เลยคลาสสดรสโนริ" → "เลย์คลาสสิค รสโนริสาหร่าย"
+  "เรนเจอร์ยาจดกันยุง" → "เรนเจอร์ ยากันยุง" """
 
     prompt = f"""ใบเสร็จ CJ Express:
 
@@ -1345,36 +1379,18 @@ def _merge_gdrive_lines(lines: list) -> list:
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)', re.IGNORECASE)
-    _kw_count   = re.compile(r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม', re.IGNORECASE)
+    _kw_count   = re.compile(r'จ[ํา]?นวนสินค[้า]?[่า]?\s*รวม', re.IGNORECASE)
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
 
-    # ── FIX: normalize OCR errors ก่อน process ──
-    _normalized = []
-    for l in lines:
-        # "สวนลด" (ไม่มีวรรณยุกต์) → "ส่วนลด"
-        l = re.sub(r'\bสวนลด\b', 'ส่วนลด', l)
-        # "จานวนสินค้ารวม" (ไม่มีวรรณยุกต์) → "จำนวนสินค้ารวม"
-        l = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', l)
-        _normalized.append(l)
-    lines = _normalized
-
-    # ── FIX: _merge_kw_price ตัด note ท้ายชื่อสินค้าด้วย ──
     def _merge_kw_price(lines):
         out = []
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            # ตัด "จำนวนสินค้ารวมXรายการ" และ OCR variants
+            # ตัด "จำนวนสินค้ารวมXรายการ" ออกจากท้ายบรรทัด
             line = re.sub(
-                r'(?:จ|ส)[ำํา]?[านน]{1,2}[วน]?[านน]สินค[้า]?[่า]?\s*ร[วา]ม\S*รายการ',
-                '', line
-            ).strip()
-            line = re.sub(r'สา[นม]านสินค[้า]?ราม\S*', '', line).strip()
-            # ตัด note ท้ายชื่อสินค้า
-            line = re.sub(
-                r'\s+(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)\s*$',
-                '', line, flags=re.IGNORECASE
+                r'จ[ํา]?นวนสินค[้า]?[่า]?\s*รวม[^บ]*รายการ', '', line
             ).strip()
             if _kw_amount.search(line) and not _RE_PRICE.search(line):
                 j = i + 1
@@ -1390,6 +1406,7 @@ def _merge_gdrive_lines(lines: list) -> list:
         return out
 
     def _find_price_block(lines):
+        """ตรวจหา block ราคาที่แยกจากชื่อสินค้า — รองรับทั้ง 2+ และ 4+ บรรทัด"""
         consec = 0
         block_start = None
         for i, line in enumerate(lines):
@@ -1398,6 +1415,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                 if consec == 0:
                     block_start = i
                 consec += 1
+                # threshold ต่ำ = 2 บรรทัดราคาติดกัน + มีชื่อสินค้าข้างบน
                 if consec >= 2:
                     name_only_count = sum(
                         1 for l in lines[:block_start]
@@ -1422,41 +1440,26 @@ def _merge_gdrive_lines(lines: list) -> list:
         name_lines  = lines[:price_block_start]
         price_lines = lines[price_block_start:]
 
-        # ── FIX: ตัด note ออกจากชื่อก่อน filter ──
-        item_names = []
-        for l in name_lines:
-            s = l.strip()
-            if not s: continue
-            if _price_only.match(s): continue
-            if _kw_amount.search(s): continue
-            if _kw_count.search(s): continue
-            if re.search(r'BNO|TAX|VAT|POS|User|ID:', s, re.IGNORECASE): continue
-            if re.match(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}', s): continue
-            # ตัด note ออกจากท้ายชื่อก่อนเช็ค
-            s_no_note = re.sub(
-                r'\s+(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)\s*$',
-                '', s, flags=re.IGNORECASE
-            ).strip()
-            if _skip_note.match(s_no_note): continue
-            if not (_item_start.match(s_no_note) or _has_thai.search(s_no_note)): continue
-            item_names.append(s_no_note)
+        item_names = [l.strip() for l in name_lines
+                      if l.strip()
+                      and not _price_only.match(l.strip())
+                      and not _kw_amount.search(l.strip())
+                      and not _kw_count.search(l.strip())
+                      and (_item_start.match(l.strip()) or _has_thai.search(l.strip()))
+                      and not re.search(r'BNO|TAX|VAT|POS|User|ID:', l, re.IGNORECASE)
+                      and not re.match(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}', l.strip())
+                      and not _skip_note.match(l.strip())]
 
         raw_prices = []
-        skip_next_price = False   # ข้าม subtotal หลัง จำนวนสินค้ารวม
         for l in price_lines:
             l = l.strip()
             if not l: continue
             if _kw_amount.search(l): break
-            # จำนวนสินค้ารวม → ข้ามบรรทัดราคา subtotal ที่ตามมา
-            if _kw_count.search(l):
-                skip_next_price = True
-                continue
-            if skip_next_price and _price_only.match(l):
-                skip_next_price = False
-                continue  # ข้าม subtotal เช่น "80.00"
-            skip_next_price = False
+            if _kw_count.search(l): continue
             clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
+            # จับราคาปกติ และ "- 50.00" (ราคาที่มี - นำหน้า)
             if _price_only.match(l) and clean:
+                # แปลง "- 50.00" → "50.00"
                 clean = re.sub(r'^-\s*', '', clean).strip()
                 if not raw_prices or raw_prices[-1] != clean:
                     raw_prices.append(clean)
@@ -1468,17 +1471,14 @@ def _merge_gdrive_lines(lines: list) -> list:
             else:
                 merged.append(name)
 
+        # เพิ่มส่วนลดที่อยู่ใน price_lines
         for l in price_lines:
             l = l.strip()
             if not l: continue
             if _kw_amount.search(l): break
-            if _kw_count.search(l): continue
-            # "-40.00" → ส่วนลด
             m_disc = re.match(r'^-\s*(\d+[.,]\d{2})\s*$', l)
             if m_disc:
                 merged.append(f"1 ส่วนลด -{m_disc.group(1)}")
-            elif re.search(r'โปรโมชั่น|promotion', l, re.IGNORECASE) and _item_start.match(l):
-                merged.append(l)
 
         after_block = []
         found_kw = False
@@ -1489,7 +1489,8 @@ def _merge_gdrive_lines(lines: list) -> list:
                 after_block.append(l)
         merged += after_block
 
-        header = [l for l in name_lines if l.strip() and l.strip() not in item_names]
+        header = [l for l in name_lines
+                  if l.strip() and l.strip() not in item_names]
         return header + merged
 
     else:
@@ -1499,6 +1500,7 @@ def _merge_gdrive_lines(lines: list) -> list:
             line = lines[i].strip()
             if not line:
                 merged.append(line); i += 1; continue
+
             if _item_start.match(line) and _has_thai.search(line):
                 combined = line
                 j = i + 1
@@ -1514,6 +1516,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                         if part: combined += " " + part
                         price_count += 1
                         j += 1
+                        # ข้าม note หลังราคา
                         while j < len(lines) and _skip_note.match(lines[j].strip()):
                             j += 1
                     elif re.match(r'^-\s*\d+[.,]\d{2}\s*[Vv]?\s*$', nx):

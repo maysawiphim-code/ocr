@@ -962,7 +962,10 @@ def _categorize_by_rule(name: str) -> str:
     """Rule-based categorization — ทำงานโดยไม่ต้องเรียก Gemini"""
     if _is_bao_item(name):
         return BAO_CAFE_CATEGORY
+    if re.search(r'ส่วนลด|โปรโมชั่น|discount|promotion', name, re.IGNORECASE):
+        return "ส่วนลด/โปรโมชั่น"
     n = name.lower()
+    
 
     # อาหารพร้อมทานและเบเกอรี่
     if re.search(
@@ -1159,6 +1162,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - ถ้าหาข้อมูลไม่เจอให้ใส่ "" หรือ 0.0
 - ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการเสมอ
 - ราคาของแต่ละสินค้าให้จับคู่ตามลำดับ: สินค้า 1 → ราคาชุดแรก, สินค้า 2 → ราคาชุดที่ 2
+- ถ้ามีส่วนลด เช่น "-40.00" หรือ "โปรโมชั่น -40.00" ให้ใส่เป็น item ชื่อ "ส่วนลด" ราคาติดลบ เช่น {"ชื่อสินค้า": "ส่วนลด", "จำนวน": 1, "ราคาต่อหน่วย": -40.0, "ยอดรวมสินค้า": -40.0}
+- หมวดหมู่ของส่วนลดให้ใส่ "ส่วนลด/โปรโมชั่น"
 - จำนวนสินค้ารวม N รายการ ในบิล = ต้องได้ items ครบ N รายการ"""
 
     try:
@@ -1811,7 +1816,10 @@ def extract_items_cj(text: str) -> list:
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue
-        if re.match(r'^-\s*\d+[.,]\d{2}', line.strip()): continue  # ส่วนลด (ขึ้นต้นด้วย -)
+        m_discount = re.match(r'^-\s*(\d+[.,]\d{2})\s*$', line.strip())
+        if m_discount:
+            items.append(_make_item("ส่วนลด", 1, -parse_price(m_discount.group(1)), -parse_price(m_discount.group(1))))
+            continue
         if len(line) < 4: continue
 
         line_clean = re.sub(r'^[.\[\]>"\'`*]+\s*', '', line.strip())

@@ -918,6 +918,11 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - "Bao_อเมริกาโน่เป็น" → "Bao อเมริกาโน่เย็น" (_ = space, เป็น = เย็น)
 - ส่วนลด: "-36.00","-40.00" ฯลฯ ให้ใส่เป็น item ชื่อ "ส่วนลด" ราคาติดลบ
 - "สวนลด" (ไม่มีวรรณยุกต์) = "ส่วนลด" — item ราคาติดลบ
+- "บอลรวม" หรือ "บอดรวม" = "ยอดรวม" — ข้ามไป ไม่ใช่สินค้า
+- "สานานสินค้ารามรายการ" หรือ "สำนานสินค้ารวมรายการ" = "จำนวนสินค้ารวม N รายการ" — ข้ามไป
+- "Bao.อเมริกาโนเน" = "Bao อเมริกาโน่เย็น", "Bao อเมริกาโนเป็น" = "Bao อเมริกาโน่เย็น"
+- pos_id จาก BNO: "BNO.S26061416N04-004135" → pos_id = "1416", pos_machine = "N04"
+- User line: "Useranutsata pon POS N04" → pos_machine = "N04"
 - โปรโมชั่น "1 โปรโมชั่นM 1 แถม 1 Bao" + "-40.00" → item "โปรโมชั่น 1 แถม 1 Bao" ราคา -40.0
 - "จานวนสินค้ารวมNรายการ" หรือ "จํานวนสินค้ารวมNรายการ" → ข้ามไป ไม่ใช่สินค้า
 - ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการ (ไม่นับส่วนลด)
@@ -1006,6 +1011,9 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
                 "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
                 "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
             })
+        # ── ถ้า Gemini ไม่ได้ items ให้ fallback universal parser ──
+        if not items:
+            items = universal_item_parser(raw_text)
         return {"bill": bill, "items": items, "ok": True}
     except Exception as e:
         return {"bill": None, "items": [], "ok": False, "error": str(e)}
@@ -1136,6 +1144,10 @@ def _find_pos_machine_id(text: str, compact: str) -> str:
         c = _collapse(line)
         m = re.search(r'(?:BNO|8NO|BN0)[:\s.]*[A-Z]\d{8}([A-Z]\d{2,3})-', c, re.IGNORECASE)
         if m: return m.group(1)
+    # จาก User line: "Userxxxxx POS :N04" หรือ "POS N04"
+    for line in text.split('\n'):
+        m = re.search(r'POS\s*[:\s]*([A-Z]\d{2,3})(?:\s|$)', line, re.IGNORECASE)
+        if m: return m.group(1)
     m = re.search(r'POS\s*[:\s]+([A-Z]\d{2,3})', compact, re.IGNORECASE)
     if m: return m.group(1)
     return "ไม่พบ"
@@ -1265,7 +1277,16 @@ def clean_text(text: str) -> str:
             line = re.sub(r'\b(\d{1,5})\s+(\d{2})\b(?!\s*\d)', r'\1.\2', line)
             line = re.sub(r'(\d+),(\d{2})\b', r'\1.\2', line)
         final.append(line)
-    return '\n'.join(final)
+    # normalize OCR digit errors ในบรรทัดที่มีราคา
+    price_kw = re.compile(r'\d|[Vv]\s*$|[Oo]{2}|\bl')
+    result_lines = []
+    for line in final:
+        if price_kw.search(line):
+            line = re.sub(r'\bl(\d)', r'1\1', line)
+            line = re.sub(r'(\d+[.,])[Oo]{2}', r'\g<1>00', line)
+            line = re.sub(r'(\d)[Oo](\d)', r'\g<1>0\2', line)
+        result_lines.append(line)
+    return '\n'.join(result_lines)
 
 def extract_receipt(text: str) -> dict:
     lines   = text.split('\n')
@@ -1350,6 +1371,221 @@ def _clean_item_name(nm: str) -> str:
     nm = re.sub(r'^[!"\'|！,\-\.]+\s*', '', nm)
     nm = re.sub(r'\s*[!"\'|！,\-]+$', '', nm)
     return nm.strip()
+
+
+
+def universal_item_parser(text: str) -> list:
+    """
+    Universal parser รองรับทุก OCR format — 100 test cases
+    """
+    _RE_PRICE = re.compile(
+        r'(\d{1,6}[.,]\d{2})'           # 12.00 / 12,00
+        r'|\b(\d{1,5})\s+(\d{2})\b'  # 12 00
+    )
+    _RE_NEG   = re.compile(r'^-\s*(\d+[.,]\d{2})\s*[Vv]?\s*$')
+    _RE_DATE  = re.compile(r'^\s*\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\s*(\d{2}:\d{2})?\s*$')
+    # _SKIP: เฉพาะ standalone keywords ไม่ใช่ substring
+    _SKIP_UP  = re.compile(
+        r'(?:^|\s)(?:ยอดรวม|บอลรวม|บอดราม|รวมสุทธิ|รวมทั้งสิ้น|UORTIN|UORT)(?:\s|$)'
+        r'|(?:^|\s)(?:เงินสด|เงินทอน|เงินเด|ในสต|เงินบน)(?:\s|$)'
+        r'|^BNO|^8NO|^TAX|^MORE|^TAXID|^INCLUDED|^ID:|^User|^POS\s*:|QR\s*ธนาคาร'
+        r'|^สมาชิก|^รหัสสมาชิก|^แต้ม|^ขอบคุณ|^ร้องเรียน|^RECEIPT|^INVOICE'
+        r'|^บาว\s*คาเฟ่|^ลูกค้าสามารถ',
+        re.IGNORECASE)
+    _KCOUNT   = re.compile(r'[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน]', re.IGNORECASE)
+    _PROMO    = re.compile(r'โปรโมชั่น|promotion', re.IGNORECASE)
+    _DISC     = re.compile(r'^ส่วนลด\s*$|^สวนลด\s*$', re.IGNORECASE)
+    _NOTE     = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot|ใบหราม)\s*$', re.IGNORECASE)
+
+    def _norm_digits(s):
+        s = re.sub(r'\bl(\d)', r'1\1', s)           # l2 → 12
+        s = re.sub(r'(\d)[Oo]([.,])', r'\g<1>0\2', s) # 2O. → 20.
+        s = re.sub(r'(\d+[.,])[Oo]{2}', r'\g<1>00', s) # 12.OO → 12.00
+        s = re.sub(r'(\d+[.,])[Oo]', r'\g<1>0', s)    # 12.O → 12.0
+        s = re.sub(r'(\d)[Oo](\d)', r'\g<1>0\2', s)   # 1O2 → 102
+        s = re.sub(r'([.,]\d*)[Oo]', r'\g<1>0', s)
+        return s
+
+    def _pp(s):
+        if not s: return 0.0
+        s = _norm_digits(str(s)).replace(',','.')
+        s = re.sub(r'[^\d.]','',s)
+        if s.count('.') > 1: s = s[:s.rfind('.',-4)] + '.' + s[-2:]
+        try: return float(s)
+        except: return 0.0
+
+    def _find_prices(s):
+        """หาราคาจาก string รองรับหลาย format"""
+        s = _norm_digits(s)
+        results = []
+        # 1. 12.00 / 12,00 (standard)
+        for m in re.finditer(r'(\d{1,6}[.,]\d{2})', s):
+            results.append(_pp(m.group(1)))
+        if results: return results
+        # 2. 12 00 (space แทน dot เช่น "12 00")
+        for m in re.finditer(r'(?<![.\d])(\d{1,5})\s+(\d{2})(?=\s|[Vv]|$)', s):
+            results.append(_pp(f"{m.group(1)}.{m.group(2)}"))
+        if results: return results
+        # 3. "6 6 V" (same number × 2, qty=1)
+        for m in re.finditer(r'(?<![.\d])(\d{1,4})\s+\1(?=\s|[Vv]|$)', s):
+            results.append(float(m.group(1)))
+        if results: return results
+        # 4. ตัวเลขเดียวที่ดูเหมือนราคา (≥5 บาท ไม่ใช่ qty)
+        # เฉพาะเมื่อ line มี Thai text และตัวเลขน้อยกว่า 3 ตัว
+        nums = re.findall(r'\b(\d{2,5})\b', re.sub(r'[Vv]\s*$','',s).strip())
+        if nums and len(nums) == 1 and not re.search(r'[ก-๙A-Za-z]',s):
+            try:
+                v = float(nums[0])
+                if 5 <= v <= 9999: results.append(v)
+            except: pass
+        return results
+
+    def _clean(s):
+        s = re.sub(r'\s*[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$','',s,flags=re.IGNORECASE)
+        s = re.sub(r'\s+(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)\s*$','',s,flags=re.IGNORECASE)
+        s = re.sub(r'\s+[Vv]\s*$','',s)
+        s = re.sub(r'\s+\d+[.,]\d{2}\s*$','',s)
+        s = re.sub(r'\s+-\s*$','',s)
+        s = re.sub(r'^[|!>"\x60\[\]]+\s*', '', s)
+        s = re.sub(r'^\d+\s+','',s)  # ตัด qty
+        return s.strip()
+
+    def _nq(s): return len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]','',s))
+
+    def _is_skip(line):
+        s = line.strip()
+        lc = re.sub(r'\s+','',s)
+        return bool(
+            _SKIP_UP.search(s) or
+            _KCOUNT.search(lc) or
+            _RE_DATE.match(s) or
+            _NOTE.match(s) or
+            re.match(r'^\d+แต้ม|แต้ม\d+|แต้มสะสม|แต้มหมด|แต้มครั้ง',s) or
+            re.match(r'^\d{5,}$',lc)  # เบอร์โทรหรือรหัสยาว
+        )
+
+    # normalize
+    lines = []
+    for l in text.split('\n'):
+        l = re.sub(r'\bสวนลด\b','ส่วนลด',l.strip())
+        l = re.sub(r'\bจานวนสินค[้า]?รวม','จำนวนสินค้ารวม',l)
+        l = re.sub(r'\s*[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$','',l,flags=re.IGNORECASE).strip()
+        l = _norm_digits(l)
+        lines.append(l)
+
+    items = []
+    used  = set()
+    i = 0
+
+    while i < len(lines):
+        if i in used: i+=1; continue
+        line = lines[i]
+        if not line: i+=1; continue
+
+        # ตัด "ยอดรวม..." inline ออกก่อน (F59: "1 น้ำดื่ม 7.00 V ยอดรวม 7.00")
+        line_p = re.sub(r'\s*(?:ยอดรวม|บอลรวม|บอดราม)[^\n]*$', '', line, flags=re.IGNORECASE).strip() or line
+        skip = _is_skip(line_p)
+
+        # ── ราคาลบ standalone
+        m_neg = _RE_NEG.match(line)
+        if m_neg:
+            p = _pp(m_neg.group(1))
+            if items and items[-1]["ยอดรวมสินค้า"] == 0.0:
+                items[-1]["ราคาต่อหน่วย"] = -p
+                items[-1]["ยอดรวมสินค้า"] = -p
+            elif p > 0:
+                items.append({"ชื่อสินค้า":"ส่วนลด","จำนวน":1,"ราคาต่อหน่วย":-p,"ยอดรวมสินค้า":-p})
+            used.add(i); i+=1; continue
+
+        # ── inline ลบ เช่น "โปรโมชั่น -4.00"
+        m_neg_inline = re.search(r'-\s*(\d+[.,]\d{2})\s*[Vv]?\s*$', line)
+        if m_neg_inline and _PROMO.search(line):
+            nm = re.sub(r'\s*-\s*\d+[.,]\d{2}\s*[Vv]?\s*$','',line).strip()
+            nm = _clean(nm)
+            p  = _pp(m_neg_inline.group(1))
+            if _nq(nm) >= 2:
+                items.append({"ชื่อสินค้า":nm,"จำนวน":1,"ราคาต่อหน่วย":-p,"ยอดรวมสินค้า":-p})
+                used.add(i); i+=1; continue
+
+        if skip: i+=1; continue
+
+        # ── "ส่วนลด" บรรทัดเดียว
+        if _DISC.match(line):
+            items.append({"ชื่อสินค้า":"ส่วนลด","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0})
+            used.add(i); i+=1; continue
+
+        has_th = bool(re.search(r'[ก-๙A-Za-z]', line_p))
+        pline  = _find_prices(line_p)
+        is_p   = bool(_PROMO.search(line))
+        # qty: ตัวเลขนำหน้า (ไม่ใช่ 0 หรือราคา)
+        qty_m  = re.match(r'^[+\-]?\s*([1-9]\d{0,1})\s+', line_p)
+        qty    = int(qty_m.group(1)) if qty_m else 1
+
+        # Format B: ชื่อ+ราคาในบรรทัดเดียว
+        is_qty_zero = bool(re.match(r'^\s*0\s+', line))
+        if has_th and len(pline) >= 1 and not is_qty_zero:
+            nm = re.sub(r'\s*\d+[.,]\d{2}.*$','',line_p,1).strip()
+            nm = _clean(nm)
+            # ป้องกัน: ชื่อต้องมี alphanumeric >=2 และไม่ใช่แค่ตัวเลข
+            if _nq(nm) >= 2 and not re.match(r'^\d+\.?\d*$',nm):
+                pv = pline; unit=pv[0]; total=pv[-1]
+                if total==0 or total<unit*0.3: total=unit*qty
+                if is_p: unit=-abs(unit); total=-abs(total)
+                items.append({"ชื่อสินค้า":nm,"จำนวน":qty,"ราคาต่อหน่วย":unit,"ยอดรวมสินค้า":total})
+                used.add(i); i+=1; continue
+
+        # Format A/C: look-ahead
+        if has_th:
+            nc = _clean(line)
+            if _nq(nc) < 2 or re.match(r'^\d+\.?\d*$',nc): i+=1; continue
+            pf = []
+            j  = i+1
+            while j < min(i+15, len(lines)) and len(pf) < 2:
+                if j in used: j+=1; continue
+                nxt = lines[j].strip()
+                if not nxt: j+=1; continue
+                if _NOTE.match(nxt): j+=1; continue
+                m_n2 = _RE_NEG.match(nxt)
+                if m_n2:
+                    if is_p:
+                        pf.append('-'+m_n2.group(1)); used.add(j)
+                    break
+                ps = _find_prices(nxt)
+                if ps and not _is_skip(nxt):
+                    pf.extend(ps[:2-len(pf)]); used.add(j)
+                elif _is_skip(nxt):
+                    pass  # ข้าม skip แต่ look-ahead ต่อ
+                j+=1
+            if pf:
+                pv=[_pp(p.lstrip('-'))*(-1 if str(p).startswith('-') else 1) for p in map(str,pf)]
+                unit=pv[0]; total=pv[-1]
+                if total>0 and total<unit*0.3: total=unit*qty
+                if is_p and total > 0: unit=-abs(unit); total=-abs(total)
+                elif is_p and total == 0:
+                    m_pamt=re.search(r'(?:ราคาพิเศษ|ลด)\s*(\d+)',nc,re.IGNORECASE)
+                    if m_pamt: total=-float(m_pamt.group(1)); unit=total
+                nc = re.sub(r'^\d+\s+','',nc).strip()
+                items.append({"ชื่อสินค้า":nc,"จำนวน":qty,"ราคาต่อหน่วย":unit,"ยอดรวมสินค้า":total})
+                used.add(i)
+            elif not pf:
+                # backward scan: ราคาอาจอยู่ก่อน item line
+                for bj in range(max(0,i-5), i):
+                    if bj in used: continue
+                    bp = _find_prices(lines[bj].strip())
+                    if bp and not _is_skip(lines[bj]):
+                        bunit=bp[0]; btotal=bp[-1]
+                        if btotal<bunit*0.3: btotal=bunit*qty
+                        nc2=re.sub(r'^\d+\s+','',nc).strip()
+                        items.append({"ชื่อสินค้า":nc2,"จำนวน":qty,"ราคาต่อหน่วย":bunit,"ยอดรวมสินค้า":btotal})
+                        used.add(i); used.add(bj)
+                        break
+        i+=1
+
+    # หมวดหมู่
+    for it in items:
+        it["หมวดหมู่"] = _categorize_by_rule(it["ชื่อสินค้า"])
+    return items
+
 
 def _merge_gdrive_lines(lines: list) -> list:
     _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
@@ -1477,7 +1713,20 @@ def _merge_gdrive_lines(lines: list) -> list:
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
                 elif cur_name:
-                    items_merged.append(cur_name)
+                    # ราคาอาจอยู่หลัง break line → look-ahead
+                    _lookahead_price = None
+                    _cur_idx = lines.index(l) if l in lines else -1
+                    if _cur_idx >= 0:
+                        for _j in range(_cur_idx + 1, min(_cur_idx + 8, len(lines))):
+                            _ls = lines[_j].strip()
+                            _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
+                            if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
+                                _lookahead_price = _lc
+                                break
+                    if _lookahead_price:
+                        items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
+                    else:
+                        items_merged.append(cur_name)
                 cur_name = None; prices_buf = []
                 break
             if _kw_count.search(s): continue
@@ -1713,6 +1962,10 @@ def extract_items_cj(text: str) -> list:
         except Exception:
             # ── FIX: ข้าม line ที่ error แทนที่จะหยุดทั้งหมด ──
             continue
+
+    # ── Fallback: ถ้าได้ 0 items ให้ลอง universal_item_parser ──
+    if not items:
+        items = universal_item_parser(text)
 
     return items
 

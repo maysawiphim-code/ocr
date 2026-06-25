@@ -1349,6 +1349,16 @@ def _merge_gdrive_lines(lines: list) -> list:
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
 
+    # ── FIX: normalize OCR errors ก่อน process ──
+    _normalized = []
+    for l in lines:
+        # "สวนลด" (ไม่มีวรรณยุกต์) → "ส่วนลด"
+        l = re.sub(r'\bสวนลด\b', 'ส่วนลด', l)
+        # "จานวนสินค้ารวม" (ไม่มีวรรณยุกต์) → "จำนวนสินค้ารวม"
+        l = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', l)
+        _normalized.append(l)
+    lines = _normalized
+
     # ── FIX: _merge_kw_price ตัด note ท้ายชื่อสินค้าด้วย ──
     def _merge_kw_price(lines):
         out = []
@@ -1555,6 +1565,9 @@ def extract_items_cj(text: str) -> list:
         try:
             line = line.strip()
             if not line: continue
+            # normalize OCR ผิด: ไม่มีวรรณยุกต์
+            line = re.sub(r'\bสวนลด\b', 'ส่วนลด', line)
+            line = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', line)
             compact = _collapse(line)
 
             if re.search(r'จ.{0,3}นวนส', compact): break

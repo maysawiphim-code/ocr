@@ -1077,7 +1077,108 @@ def categorize_items_batch(items: list) -> list:
 
     return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ"
             for bao in pre_assigned]
+def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
+    """ให้ Gemini แยก N บิลจาก raw text เดียวที่มีหลายบิลรวมกัน"""
+    prompt = f"""นี่คือข้อความจากรูปภาพที่มี {n_bills} ใบเสร็จเคียงกัน อ่านด้วย Google Drive OCR:
 
+{raw_text}
+
+กรุณาแยกข้อมูลออกเป็น {n_bills} ใบเสร็จ และดึงข้อมูลแต่ละใบออกมา
+
+กฎสำคัญ:
+- แต่ละบิลจะมี BNO: และ ID:E เป็นของตัวเอง ใช้เป็นจุดแบ่งบิล
+- pos_id: ดึงจาก BNO เช่น BNO:S26061416N03 → pos_id = "1416"
+- OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo", "Bao.", "Bao_" → แปลงเป็น "Bao" เสมอ
+- "หวานน้อย" "หวานปกติ" "ไม่หวาน" คือ note ไม่ใช่สินค้า ข้ามไป
+- ส่วนลด "-40.00" ให้ใส่เป็น item ชื่อ "ส่วนลด" ราคาติดลบ
+  เช่น {{"ชื่อสินค้า":"ส่วนลด","หมวดหมู่":"ส่วนลด/โปรโมชั่น","จำนวน":1,"ราคาต่อหน่วย":-40.0,"ยอดรวมสินค้า":-40.0}}
+- ถ้า OCR รวม 2 บิลเป็น text เดียวกัน ให้แยกตาม BNO และ ID:E
+
+{BAO_CAFE_MENU}
+{CJ_PRODUCT_KNOWLEDGE}
+{CATEGORY_PROMPT}
+
+ตอบเป็น JSON array ของ {n_bills} บิล ไม่ต้องมีข้อความอื่น:
+[
+  {{
+    "date": "วัน/เดือน/ปี",
+    "time": "HH:MM",
+    "branch": "ชื่อสาขา",
+    "pos_id": "รหัสสาขา 4 หลัก",
+    "pos_machine": "NXX",
+    "rcpt_no": "เลขที่ใบเสร็จ",
+    "total_amount": 0.0,
+    "items": [
+      {{
+        "ชื่อสินค้า": "ชื่อสินค้า",
+        "หมวดหมู่": "หมวดหมู่",
+        "จำนวน": 1,
+        "ราคาต่อหน่วย": 0.0,
+        "ยอดรวมสินค้า": 0.0
+      }}
+    ]
+  }}
+]"""
+
+    try:
+        raw = _call_gemini(prompt, max_tokens=2000)
+        raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+        bills_raw = json.loads(raw)
+        if not isinstance(bills_raw, list):
+            bills_raw = [bills_raw]
+
+        results = []
+        for bd in bills_raw[:n_bills]:
+            bill = {
+                "date":         str(bd.get("date", "ไม่พบ")),
+                "time":         str(bd.get("time", "ไม่พบ")),
+                "branch":       str(bd.get("branch", "ไม่พบ")),
+                "pos_id":       str(bd.get("pos_id", "ไม่พบ")),
+                "pos_machine":  str(bd.get("pos_machine", "ไม่พบ")),
+                "rcpt_no":      str(bd.get("rcpt_no", "ไม่พบ")),
+                "total_amount": float(bd.get("total_amount", 0)),
+                "cash":         0.0,
+                "change":       0.0,
+                "tax_id":       "ไม่พบ",
+                "user":         "ไม่พบ",
+                "name":         "ไม่พบ",
+            }
+            items = []
+            for it in bd.get("items", []):
+                name = str(it.get("ชื่อสินค้า", ""))
+                cat  = BAO_CAFE_CATEGORY if _is_bao_item(name) else str(it.get("หมวดหมู่", ""))
+                if not cat: cat = _categorize_by_rule(name)
+                items.append({
+                    "ชื่อสินค้า":    name,
+                    "หมวดหมู่":     cat,
+                    "จำนวน":        int(it.get("จำนวน", 1)),
+                    "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                    "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
+                })
+            results.append({"bill": bill, "items": items})
+
+        # ถ้า Gemini คืนน้อยกว่า n_bills ให้เติม empty bill
+        while len(results) < n_bills:
+            results.append({
+                "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ",
+                         "pos_id":"ไม่พบ","pos_machine":"ไม่พบ","rcpt_no":"ไม่พบ",
+                         "total_amount":0.0,"cash":0.0,"change":0.0,
+                         "tax_id":"ไม่พบ","user":"ไม่พบ","name":"ไม่พบ"},
+                "items": []
+            })
+        return results
+
+    except Exception as e:
+        # fallback: ใช้ extract_with_gemini ปกติสำหรับแต่ละบิล
+        single = extract_with_gemini(raw_text, ocr_source="gdrive")
+        result = [single] if single["ok"] else []
+        while len(result) < n_bills:
+            result.append({"bill": single["bill"] if single["ok"] else {
+                "date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ",
+                "pos_id":"ไม่พบ","pos_machine":"ไม่พบ","rcpt_no":"ไม่พบ",
+                "total_amount":0.0,"cash":0.0,"change":0.0,
+                "tax_id":"ไม่พบ","user":"ไม่พบ","name":"ไม่พบ"}, "items": []})
+        return result
 
 def extract_items_with_gemini(raw_text: str) -> list:
     result = extract_with_gemini(raw_text)
@@ -1651,7 +1752,7 @@ def _clean_item_name(nm: str) -> str:
     return nm.strip()
 
 
-def _merge_gdrive_lines(lines: list) -> list:
+ddef _merge_gdrive_lines(lines: list) -> list:
     _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
@@ -1660,38 +1761,19 @@ def _merge_gdrive_lines(lines: list) -> list:
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)', re.IGNORECASE)
+    _kw_count   = re.compile(r'จ[ํา]?นวนสินค[้า]?[่า]?\s*รวม', re.IGNORECASE)
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
-
-    def _find_price_block(lines):
-        consec = 0
-        block_start = None
-        for i, line in enumerate(lines):
-            s = line.strip()
-            if _price_only.match(s) and s:
-                if consec == 0:
-                    block_start = i
-                consec += 1
-                if consec >= 6:
-                    name_only_count = sum(
-                        1 for l in lines[:block_start]
-                        if _item_start.match(l.strip())
-                        and _has_thai.search(l)
-                        and not _RE_PRICE.search(l)
-                    )
-                    if name_only_count >= 3:
-                        return block_start
-            else:
-                consec = 0
-                block_start = None
-        return None
 
     def _merge_kw_price(lines):
         out = []
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            line = re.sub(r'จ[ํา]?นวนสินค[้า]?[่า]?รวม\s*\w*\s*รายการ', '', line).strip()
+            # ตัด "จำนวนสินค้ารวมXรายการ" ออกจากท้ายบรรทัด
+            line = re.sub(
+                r'จ[ํา]?นวนสินค[้า]?[่า]?\s*รวม[^บ]*รายการ', '', line
+            ).strip()
             if _kw_amount.search(line) and not _RE_PRICE.search(line):
                 j = i + 1
                 if j < len(lines):
@@ -1700,9 +1782,35 @@ def _merge_gdrive_lines(lines: list) -> list:
                         out.append(line + " " + nx)
                         i = j + 1
                         continue
-            out.append(line)
+            if line:
+                out.append(line)
             i += 1
         return out
+
+    def _find_price_block(lines):
+        """ตรวจหา block ราคาที่แยกจากชื่อสินค้า — รองรับทั้ง 2+ และ 4+ บรรทัด"""
+        consec = 0
+        block_start = None
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if _price_only.match(s) and s:
+                if consec == 0:
+                    block_start = i
+                consec += 1
+                # threshold ต่ำ = 2 บรรทัดราคาติดกัน + มีชื่อสินค้าข้างบน
+                if consec >= 2:
+                    name_only_count = sum(
+                        1 for l in lines[:block_start]
+                        if _item_start.match(l.strip())
+                        and _has_thai.search(l)
+                        and not _RE_PRICE.search(l)
+                    )
+                    if name_only_count >= 1:
+                        return block_start
+            else:
+                consec = 0
+                block_start = None
+        return None
 
     lines = _merge_kw_price(lines)
     lines = [re.sub(r'\b(\d{1,2}):(\d{2})\b',
@@ -1710,31 +1818,50 @@ def _merge_gdrive_lines(lines: list) -> list:
 
     price_block_start = _find_price_block(lines)
 
-    if price_block_start and price_block_start > 3:
+    if price_block_start and price_block_start > 0:
         name_lines  = lines[:price_block_start]
         price_lines = lines[price_block_start:]
+
         item_names = [l.strip() for l in name_lines
-                      if l.strip() and not _price_only.match(l.strip())
+                      if l.strip()
+                      and not _price_only.match(l.strip())
                       and not _kw_amount.search(l.strip())
+                      and not _kw_count.search(l.strip())
                       and (_item_start.match(l.strip()) or _has_thai.search(l.strip()))
                       and not re.search(r'BNO|TAX|VAT|POS|User|ID:', l, re.IGNORECASE)
                       and not re.match(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}', l.strip())
                       and not _skip_note.match(l.strip())]
+
         raw_prices = []
         for l in price_lines:
             l = l.strip()
             if not l: continue
             if _kw_amount.search(l): break
+            if _kw_count.search(l): continue
             clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
+            # จับราคาปกติ และ "- 50.00" (ราคาที่มี - นำหน้า)
             if _price_only.match(l) and clean:
+                # แปลง "- 50.00" → "50.00"
+                clean = re.sub(r'^-\s*', '', clean).strip()
                 if not raw_prices or raw_prices[-1] != clean:
                     raw_prices.append(clean)
+
         merged = []
         for i, name in enumerate(item_names):
             if i < len(raw_prices):
                 merged.append(f"{name} {raw_prices[i]}")
             else:
                 merged.append(name)
+
+        # เพิ่มส่วนลดที่อยู่ใน price_lines
+        for l in price_lines:
+            l = l.strip()
+            if not l: continue
+            if _kw_amount.search(l): break
+            m_disc = re.match(r'^-\s*(\d+[.,]\d{2})\s*$', l)
+            if m_disc:
+                merged.append(f"1 ส่วนลด -{m_disc.group(1)}")
+
         after_block = []
         found_kw = False
         for l in price_lines:
@@ -1743,8 +1870,9 @@ def _merge_gdrive_lines(lines: list) -> list:
             if found_kw:
                 after_block.append(l)
         merged += after_block
+
         header = [l for l in name_lines
-                  if l.strip() and l.strip() not in [n for n in item_names]]
+                  if l.strip() and l.strip() not in item_names]
         return header + merged
 
     else:
@@ -1766,13 +1894,14 @@ def _merge_gdrive_lines(lines: list) -> list:
                         j += 1; continue
                     if _price_only.match(nx):
                         part = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
+                        part = re.sub(r'^-\s*', '', part).strip()
                         if part: combined += " " + part
                         price_count += 1
                         j += 1
+                        # ข้าม note หลังราคา
                         while j < len(lines) and _skip_note.match(lines[j].strip()):
                             j += 1
                     elif re.match(r'^-\s*\d+[.,]\d{2}\s*[Vv]?\s*$', nx):
-                        # "- 50.00" หรือ "- 50.00 V" คือราคา ไม่ใช่ส่วนลด
                         part = re.sub(r'^-\s*', '', nx)
                         part = re.sub(r'\s*[Vv]\s*$', '', part).strip()
                         if part: combined += " " + part
@@ -2202,7 +2331,7 @@ document.getElementById('btn-reset').onclick = () => {{
 # Batch mode
 # ─────────────────────────────────────────────────────────────────────────────
 def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = False,
-                        ocr_engine: str = "tesseract") -> list:
+                        ocr_engine: str = "tesseract", bills_per_image: int = 1) -> list:
     results = []
     n = len(files)
     for i, (fname, fbytes) in enumerate(files, 1):
@@ -2210,10 +2339,41 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
         try:
             pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
             img_cv = pil_to_cv(pil)
+
+            # ── gdrive + หลายบิล → ส่งรูปทั้งใบ ──
+            if ocr_engine == "gdrive" and bills_per_image > 1:
+                st.session_state["_gdrive_raw_texts"] = []
+                full_text  = run_ocr(img_cv, engine="gdrive")
+                gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+
+                bills_data = extract_multi_bills_with_gemini(
+                    gdrive_raw or full_text, bills_per_image
+                )
+
+                # split รูปเพื่อ thumbnail เท่านั้น
+                thumb_crops = split_receipts_image(img_cv, n_expected=bills_per_image)
+                if len(thumb_crops) < bills_per_image:
+                    thumb_crops = thumb_crops + [img_cv] * (bills_per_image - len(thumb_crops))
+
+                for ci, bd in enumerate(bills_data):
+                    label = f"{fname} — บิล {ci+1}"
+                    thumb = thumb_crops[ci] if ci < len(thumb_crops) else img_cv
+                    results.append({
+                        "filename":   label,
+                        "bill":       bd["bill"],
+                        "items":      bd["items"],
+                        "raw_text":   full_text,
+                        "gdrive_raw": gdrive_raw,
+                        "image":      img_to_bytes_png(thumb),
+                    })
+                continue  # ข้าม logic เดิม
+
+            # ── โหมดเดิม ──
             if auto_detect_multi:
                 sub_crops = auto_crop_receipts(img_cv)
             else:
                 sub_crops = [img_cv]
+
             if len(sub_crops) == 1:
                 st.session_state["_gdrive_raw_texts"] = []
                 text       = run_ocr(sub_crops[0], engine=ocr_engine)
@@ -2252,6 +2412,7 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     results.append({"filename": label, "bill": bill, "items": items,
                                     "raw_text": text, "gdrive_raw": gdrive_raw,
                                     "image": img_to_bytes_png(crop)})
+
         except Exception as e:
             results.append({"filename": fname,
                             "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
@@ -2291,6 +2452,24 @@ def run_batch_mode_ui():
                 except Exception:
                     st.warning(fname[:16])
     st.divider()
+    # เลือกจำนวนบิลต่อรูป (เฉพาะ gdrive)
+    if S.ocr_engine == "gdrive":
+        bills_col, _ = st.columns([2, 2])
+        with bills_col:
+            bills_per_img = st.radio(
+                "📄 แต่ละรูปมีกี่บิล",
+                [1, 2, 3],
+                index=S.get("batch_bills_per_image", 1) - 1,
+                horizontal=True,
+                key="batch_bills_per_image_radio"
+            )
+            S["batch_bills_per_image"] = bills_per_img
+            if bills_per_img > 1:
+                st.info(f"✅ จะส่งรูปทั้งใบให้ Google Drive OCR อ่าน แล้วให้ Gemini แยก {bills_per_img} บิลอัตโนมัติ")
+    else:
+        S["batch_bills_per_image"] = 1
+
+    auto_detect = st.checkbox(...)
     auto_detect = st.checkbox(
         "🪄 ตรวจจับหลายใบเสร็จในภาพเดียวอัตโนมัติ + ทำพื้นหลังขาว",
         value=False, key="batch_auto_detect")
@@ -2307,7 +2486,9 @@ def run_batch_mode_ui():
         def _cb(i, n, fname):
             progress_bar.progress(i / n, text=t("batch_progress")(i, n, fname))
         results = run_batch_analysis(S.batch_files, progress_cb=_cb,
-                                      auto_detect_multi=auto_detect, ocr_engine=S.ocr_engine)
+                                      auto_detect_multi=auto_detect,
+                                      ocr_engine=S.ocr_engine,
+                                      bills_per_image=S.get("batch_bills_per_image", 1))
         progress_bar.progress(1.0, text=t("batch_done")(len(results)))
         S.all_bills = results
         st.rerun()
@@ -2656,56 +2837,85 @@ def main():
             if st.button(t("analyze"), use_container_width=True, type="primary"):
                 with st.spinner("กำลัง OCR..."):
                     img_cv = pil_to_cv(working_pil)
-                    if S.bill_count == 1:
-                        crops = [img_cv]
-                    elif S.manual_splits_px:
-                        crops = split_by_positions(img_cv, S.manual_splits_px)
-                    else:
-                        crops = split_receipts_image(img_cv, n_expected=S.bill_count)
-                    if len(crops) < S.bill_count:
-                        crops = crops + [img_cv] * (S.bill_count - len(crops))
-                    crops = crops[:S.bill_count]
                     all_bills = []
                     fname = (S.gallery_files[S.selected_idx][0]
                              if 0 <= S.selected_idx < len(S.gallery_files) else "image")
                     progress = st.progress(0, text="เริ่มต้น OCR...")
-                    for ci, crop in enumerate(crops):
-                        label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
-                        progress.progress(
-                            (ci) / len(crops),
-                            text=f"📤 กำลังส่ง Google Drive OCR: บิล {ci+1}/{len(crops)}..."
-                                 if S.ocr_engine == "gdrive"
-                                 else f"🔍 OCR บิล {ci+1}/{len(crops)}..."
-                        )
+
+                    # ── ถ้า gdrive + หลายบิล → ส่งรูปทั้งใบ ไม่ split ──
+                    if S.ocr_engine == "gdrive" and S.bill_count > 1:
+                        progress.progress(0.2, text=f"📤 กำลังส่ง Google Drive OCR ทั้งรูป...")
                         st.session_state["_gdrive_raw_texts"] = []
-                        text       = run_ocr(crop, engine=S.ocr_engine)
+                        full_text  = run_ocr(img_cv, engine="gdrive")
                         gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
 
-                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+                        progress.progress(0.5, text=f"✨ Gemini แยก {S.bill_count} บิล...")
+                        bills_data = extract_multi_bills_with_gemini(
+                            gdrive_raw or full_text, S.bill_count
+                        )
 
-                        if is_gemini_configured() and text_for_gemini.strip():
-                            progress.progress(
-                                (ci + 0.5) / len(crops),
-                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}..."
-                            )
-                            gemini_result = extract_with_gemini(
-                                text_for_gemini,
-                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract"
-                            )
-                            if gemini_result["ok"] and gemini_result["items"]:
-                                bill  = gemini_result["bill"]
-                                items = gemini_result["items"]
+                        # split รูปเพื่อแสดง thumbnail เท่านั้น
+                        if S.manual_splits_px:
+                            thumb_crops = split_by_positions(img_cv, S.manual_splits_px)
+                        else:
+                            thumb_crops = split_receipts_image(img_cv, n_expected=S.bill_count)
+                        if len(thumb_crops) < S.bill_count:
+                            thumb_crops = thumb_crops + [img_cv] * (S.bill_count - len(thumb_crops))
+
+                        for ci, bd in enumerate(bills_data):
+                            label = f"{fname} — บิล {ci+1}"
+                            thumb = thumb_crops[ci] if ci < len(thumb_crops) else img_cv
+                            all_bills.append({
+                                "filename": label,
+                                "bill":     bd["bill"],
+                                "items":    bd["items"],
+                                "raw_text": full_text,
+                                "gdrive_raw": gdrive_raw,
+                                "image":    img_to_bytes_png(thumb),
+                            })
+                        progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {S.bill_count} บิล")
+
+                    else:
+                        # ── โหมดเดิม: split รูปก่อน OCR ──
+                        if S.bill_count == 1:
+                            crops = [img_cv]
+                        elif S.manual_splits_px:
+                            crops = split_by_positions(img_cv, S.manual_splits_px)
+                        else:
+                            crops = split_receipts_image(img_cv, n_expected=S.bill_count)
+                        if len(crops) < S.bill_count:
+                            crops = crops + [img_cv] * (S.bill_count - len(crops))
+                        crops = crops[:S.bill_count]
+
+                        for ci, crop in enumerate(crops):
+                            label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
+                            progress.progress((ci) / len(crops),
+                                text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
+                            st.session_state["_gdrive_raw_texts"] = []
+                            text       = run_ocr(crop, engine=S.ocr_engine)
+                            gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                            text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+                            if is_gemini_configured() and text_for_gemini.strip():
+                                progress.progress((ci + 0.5) / len(crops),
+                                    text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
+                                gemini_result = extract_with_gemini(
+                                    text_for_gemini,
+                                    ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract"
+                                )
+                                if gemini_result["ok"] and gemini_result["items"]:
+                                    bill  = gemini_result["bill"]
+                                    items = gemini_result["items"]
+                                else:
+                                    bill  = extract_receipt(text)
+                                    items = extract_items_cj(text)
                             else:
                                 bill  = extract_receipt(text)
                                 items = extract_items_cj(text)
-                        else:
-                            bill  = extract_receipt(text)
-                            items = extract_items_cj(text)
+                            all_bills.append({"filename":label,"bill":bill,"items":items,
+                                              "raw_text":text,"gdrive_raw":gdrive_raw,
+                                              "image":img_to_bytes_png(crop)})
+                        progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
 
-                        all_bills.append({"filename":label,"bill":bill,"items":items,
-                                          "raw_text":text,"gdrive_raw":gdrive_raw,
-                                          "image":img_to_bytes_png(crop)})
-                    progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
                     S.all_bills = all_bills; S.step=4; st.rerun()
 
     if S.all_bills:

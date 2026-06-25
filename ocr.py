@@ -1345,7 +1345,7 @@ def _merge_gdrive_lines(lines: list) -> list:
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)', re.IGNORECASE)
-    _kw_count   = re.compile(r'จ[ํา]?นวนสินค[้a]?[่a]?\s*รวม', re.IGNORECASE)
+    _kw_count   = re.compile(r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม', re.IGNORECASE)
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
 
@@ -1442,22 +1442,19 @@ def _merge_gdrive_lines(lines: list) -> list:
             item_names.append(s_no_note)
 
         raw_prices = []
+        skip_next_price = False   # ข้าม subtotal หลัง จำนวนสินค้ารวม
         for l in price_lines:
             l = l.strip()
             if not l: continue
             if _kw_amount.search(l): break
+            # จำนวนสินค้ารวม → ข้ามบรรทัดราคา subtotal ที่ตามมา
             if _kw_count.search(l):
-                skip_next_after_count = True
+                skip_next_price = True
                 continue
-            if skip_next_after_count and _price_only.match(l):
-                skip_next_after_count = False
+            if skip_next_price and _price_only.match(l):
+                skip_next_price = False
                 continue  # ข้าม subtotal เช่น "80.00"
-            skip_next_after_count = False
-            clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
-            if _price_only.match(l) and clean:
-                clean = re.sub(r'^-\s*', '', clean).strip()
-                if not raw_prices or raw_prices[-1] != clean:
-                    raw_prices.append(clean)
+            skip_next_price = False
             clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
             if _price_only.match(l) and clean:
                 clean = re.sub(r'^-\s*', '', clean).strip()
@@ -1480,8 +1477,9 @@ def _merge_gdrive_lines(lines: list) -> list:
             m_disc = re.match(r'^-\s*(\d+[.,]\d{2})\s*$', l)
             if m_disc:
                 merged.append(f"1 ส่วนลด -{m_disc.group(1)}")
-             elif re.search(r'โปรโมชั่น|promotion', l, re.IGNORECASE):
+            elif re.search(r'โปรโมชั่น|promotion', l, re.IGNORECASE) and _item_start.match(l):
                 merged.append(l)
+
         after_block = []
         found_kw = False
         for l in price_lines:
@@ -1584,7 +1582,7 @@ def extract_items_cj(text: str) -> list:
             line = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', line)
             compact = _collapse(line)
 
-            if re.search(r'จ.{0,3}นวนส', compact): break
+            if re.search(r'จ[าำ]?นวนสินค[้า]?[่า]?\s*รวม', line): break  # จำนวนสินค้ารวม
             if re.search(r'จ.{0,3}นวนสินค.{0,3}รวม', compact): break
             if re.search(r'สา[นม]านสินค', compact): break
             if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break

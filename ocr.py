@@ -1122,7 +1122,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "date": "วัน/เดือน/ปี",
   "time": "HH:MM",
   "branch": "ชื่อสาขา",
-  "pos_id": "รหัสสาขา 5 หลัก (ตัวเลขเท่านั้น เช่น 01275 หรือ 01179)",
+  "pos_id": str(data.get("pos_id", "ไม่พบ")),
+  "pos_machine":  _find_pos_machine_id(raw_text, _collapse(raw_text)),  # ← เพิ่ม
   "rcpt_no": "เลขที่ใบเสร็จ",
   "total_amount": 0.0,
   "cash": 0.0,
@@ -1347,29 +1348,38 @@ def _find_rcpt_no(text: str, compact: str) -> str:
             nums = re.findall(r'\d{6,}', _collapse(line))
             if nums: return max(nums, key=len)
     return "ไม่พบ"
-
+def _find_pos_machine_id(text: str, compact: str) -> str:
+    """ดึง POS ID เช่น N02 จาก BNO:S26062221N02-002492"""
+    for line in text.split('\n'):
+        c = _collapse(line)
+        m = re.search(r'(?:BNO|8NO|BN0)[:\s]*[A-Z]\d{8}([A-Z]\d{2,3})-', c, re.IGNORECASE)
+        if m: return m.group(1)
+    m = re.search(r'POS\s*[:\s]+([A-Z]\d{2,3})', compact, re.IGNORECASE)
+    if m: return m.group(1)
+    return "ไม่พบ"
 
 def _find_pos_id(text: str, compact: str, lines: list) -> str:
+    # 1. BNO: S + ปี(2) + เดือน(2) + สาขา(4) + N...
+    for line in text.split('\n'):
+        c = _collapse(line)
+        m = re.search(r'(?:BNO|8NO|BN0)[:\s]*[A-Z]\d{4}(\d{4})[A-Z]\d+', c, re.IGNORECASE)
+        if m: return m.group(1)
+    # 2. keyword สาขา
     _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
     for line in lines[:12]:
         c = _collapse(line)
-        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(0\d{4})', c, re.IGNORECASE)
-        if m:
-            return m.group(1)  # คืนค่าพร้อม 0 นำหน้า เช่น 00904
-            return val
+        m = re.search(_BRANCH_KW + r'[^\d]{0,4}(0?\d{4,5})', c, re.IGNORECASE)
+        if m: return m.group(1)
     for line in lines[:12]:
         c = _collapse(line)
         if re.search(r'มอร์|มอร|เจเอ|CJ|MORE', line, re.IGNORECASE) or 'มอร์' in c:
             nums = re.findall(r'0?\d{4,5}(?!\d)', c)
-            if nums:
-                val = nums[0].lstrip('0') or nums[0]
-                return val
+            if nums: return nums[0]
     m = re.search(r'(?:สาขา|branch)[^\d]{0,5}(\d{4,5})', compact, re.IGNORECASE)
-    if m:
-        return m.group(1).lstrip('0') or m.group(1)
+    if m: return m.group(1)
     nums_all = re.findall(r'(?<!\d)0?\d{4,5}(?!\d)', compact)
-    if nums_all:
-        return nums_all[0].lstrip('0') or nums_all[0]
+    if nums_all: return nums_all[0]
+    # POS fallback ต่ำสุด
     for line in lines[:10]:
         c = _collapse(line)
         m = re.search(r'POS\s*[.\s]*NO\s*S?\s*(\d{1,2})\b', c, re.IGNORECASE)
@@ -1567,12 +1577,14 @@ def extract_receipt(text: str) -> dict:
         if m:
             candidate = re.sub(r'^\d+\s*[xXP]?\s*', '', line[:m.start()]).strip()
             if len(candidate) >= 2: name = candidate; break
+            pos_machine = _find_pos_machine_id(text, compact) 
     return {
         "date": date_str, "time": time_val, "branch": branch, "name": name,
         "total_amount": total, "cash": 0.0, "change": 0.0,
+        "pos_id": pos_id, "pos_machine": pos_machine, 
         "pos_id": pos_id, "rcpt_no": rcpt_no, "tax_id": tax_id, "user": user,
     }
-
+    
 
 def _fix_spaced_price_core(s: str) -> str:
     def _dot4(m):
@@ -1835,6 +1847,7 @@ def build_excel(all_bills: list) -> bytes:
             d = b['bill']
             base = {"ไฟล์":b['filename'],"วันที่":d['date'],"เวลา":d['time'],
                     "สาขา":d['branch'],"รหัสสาขา":d['pos_id'],
+                    "POS ID":d.get('pos_machine',''),
                     "เลขที่ใบเสร็จ":d['rcpt_no']}
             items = b['items'] or []
             for it in items:
@@ -2244,11 +2257,12 @@ def run_batch_mode_ui():
                 with dc:
                     d = b['bill']
                     st.markdown("**ตรวจสอบ / แก้ไข**")
-                    r1 = st.columns(4)
-                    d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"dt{idx}")
-                    d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
-                    d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"ps{idx}")
-                    d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"rc{idx}")
+                    r1 = st.columns(5)
+                    d['date']        = r1[0].text_input("วันที่",         d['date'],                    key=f"dt{idx}")
+                    d['time']        = r1[1].text_input("เวลา",           d['time'],                    key=f"tm{idx}")
+                    d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],                  key=f"ps{idx}")
+                    d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''),      key=f"pm{idx}")
+                    d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],                 key=f"rc{idx}")
                     tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
                     d['total_amount'] = parse_price(tot_str)
                 st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
@@ -2640,11 +2654,12 @@ def main():
                 with dc:
                     d = b['bill']
                     st.markdown("**ตรวจสอบ / แก้ไข**")
-                    r1 = st.columns(4)
-                    d['date']    = r1[0].text_input("วันที่",         d['date'],    key=f"dt{idx}")
-                    d['time']    = r1[1].text_input("เวลา",           d['time'],    key=f"tm{idx}")
-                    d['pos_id']  = r1[2].text_input("รหัสสาขา/POS",  d['pos_id'],  key=f"ps{idx}")
-                    d['rcpt_no'] = r1[3].text_input("เลขที่ใบเสร็จ", d['rcpt_no'], key=f"rc{idx}")
+                    r1 = st.columns(5)
+                    d['date']        = r1[0].text_input("วันที่",         d['date'],                    key=f"dt{idx}")
+                    d['time']        = r1[1].text_input("เวลา",           d['time'],                    key=f"tm{idx}")
+                    d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],                  key=f"ps{idx}")
+                    d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''),      key=f"pm{idx}")
+                    d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],                 key=f"rc{idx}")
                     tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"tot{idx}")
                     d['total_amount'] = parse_price(tot_str)
                 st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")

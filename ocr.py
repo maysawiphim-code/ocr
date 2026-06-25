@@ -2368,31 +2368,35 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
 
             # ── gdrive + หลายบิล → ส่งรูปทั้งใบ ──
             if ocr_engine == "gdrive" and bills_per_image > 1:
-                st.session_state["_gdrive_raw_texts"] = []
-                full_text  = run_ocr(img_cv, engine="gdrive")
-                gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-
-                bills_data = extract_multi_bills_with_gemini(
-                    gdrive_raw or full_text, bills_per_image
-                )
-
-                # split รูปเพื่อ thumbnail เท่านั้น
                 thumb_crops = split_receipts_image(img_cv, n_expected=bills_per_image)
                 if len(thumb_crops) < bills_per_image:
                     thumb_crops = thumb_crops + [img_cv] * (bills_per_image - len(thumb_crops))
+                thumb_crops = thumb_crops[:bills_per_image]
 
-                for ci, bd in enumerate(bills_data):
+                for ci, crop in enumerate(thumb_crops):
                     label = f"{fname} — บิล {ci+1}"
-                    thumb = thumb_crops[ci] if ci < len(thumb_crops) else img_cv
+                    st.session_state["_gdrive_raw_texts"] = []
+                    text       = run_ocr(crop, engine="gdrive")
+                    gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                    text_for_gemini = gdrive_raw if gdrive_raw else text
+
+                    if is_gemini_configured() and text_for_gemini.strip():
+                        gr    = extract_with_gemini(text_for_gemini, ocr_source="gdrive")
+                        bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
+                        items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
+                    else:
+                        bill  = extract_receipt(text)
+                        items = extract_items_cj(text)
+
                     results.append({
                         "filename":   label,
-                        "bill":       bd["bill"],
-                        "items":      bd["items"],
-                        "raw_text":   full_text,
+                        "bill":       bill,
+                        "items":      items,
+                        "raw_text":   text,
                         "gdrive_raw": gdrive_raw,
-                        "image":      img_to_bytes_png(thumb),
+                        "image":      img_to_bytes_png(crop),
                     })
-                continue  # ข้าม logic เดิม
+                continue
 
             # ── โหมดเดิม ──
             if auto_detect_multi:
@@ -2869,37 +2873,55 @@ def main():
                     progress = st.progress(0, text="เริ่มต้น OCR...")
 
                     # ── ถ้า gdrive + หลายบิล → ส่งรูปทั้งใบ ไม่ split ──
+                    # ── gdrive + หลายบิล → split รูปก่อน แล้ว OCR ทีละบิล ──
                     if S.ocr_engine == "gdrive" and S.bill_count > 1:
-                        progress.progress(0.2, text=f"📤 กำลังส่ง Google Drive OCR ทั้งรูป...")
-                        st.session_state["_gdrive_raw_texts"] = []
-                        full_text  = run_ocr(img_cv, engine="gdrive")
-                        gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-
-                        progress.progress(0.5, text=f"✨ Gemini แยก {S.bill_count} บิล...")
-                        bills_data = extract_multi_bills_with_gemini(
-                            gdrive_raw or full_text, S.bill_count
-                        )
-
-                        # split รูปเพื่อแสดง thumbnail เท่านั้น
+                        # split รูปก่อน
                         if S.manual_splits_px:
-                            thumb_crops = split_by_positions(img_cv, S.manual_splits_px)
+                            crops = split_by_positions(img_cv, S.manual_splits_px)
                         else:
-                            thumb_crops = split_receipts_image(img_cv, n_expected=S.bill_count)
-                        if len(thumb_crops) < S.bill_count:
-                            thumb_crops = thumb_crops + [img_cv] * (S.bill_count - len(thumb_crops))
+                            crops = split_receipts_image(img_cv, n_expected=S.bill_count)
+                        if len(crops) < S.bill_count:
+                            crops = crops + [img_cv] * (S.bill_count - len(crops))
+                        crops = crops[:S.bill_count]
 
-                        for ci, bd in enumerate(bills_data):
+                        for ci, crop in enumerate(crops):
                             label = f"{fname} — บิล {ci+1}"
-                            thumb = thumb_crops[ci] if ci < len(thumb_crops) else img_cv
+                            progress.progress(
+                                ci / len(crops),
+                                text=f"📤 Google Drive OCR บิล {ci+1}/{len(crops)}..."
+                            )
+                            st.session_state["_gdrive_raw_texts"] = []
+                            text       = run_ocr(crop, engine="gdrive")
+                            gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                            text_for_gemini = gdrive_raw if gdrive_raw else text
+
+                            if is_gemini_configured() and text_for_gemini.strip():
+                                progress.progress(
+                                    (ci + 0.5) / len(crops),
+                                    text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}..."
+                                )
+                                gemini_result = extract_with_gemini(
+                                    text_for_gemini, ocr_source="gdrive"
+                                )
+                                if gemini_result["ok"] and gemini_result["items"]:
+                                    bill  = gemini_result["bill"]
+                                    items = gemini_result["items"]
+                                else:
+                                    bill  = extract_receipt(text)
+                                    items = extract_items_cj(text)
+                            else:
+                                bill  = extract_receipt(text)
+                                items = extract_items_cj(text)
+
                             all_bills.append({
-                                "filename": label,
-                                "bill":     bd["bill"],
-                                "items":    bd["items"],
-                                "raw_text": full_text,
+                                "filename":   label,
+                                "bill":       bill,
+                                "items":      items,
+                                "raw_text":   text,
                                 "gdrive_raw": gdrive_raw,
-                                "image":    img_to_bytes_png(thumb),
+                                "image":      img_to_bytes_png(crop),
                             })
-                        progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {S.bill_count} บิล")
+                        progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
 
                     else:
                         # ── โหมดเดิม: split รูปก่อน OCR ──

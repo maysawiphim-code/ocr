@@ -1580,16 +1580,17 @@ def extract_receipt(text: str) -> dict:
         if m:
             candidate = re.sub(r'^\d+\s*[xXP]?\s*', '', line[:m.start()]).strip()
             if len(candidate) >= 2: name = candidate; break
-            try:
+
+    try:
         pos_machine = _find_pos_machine_id(text, compact)
     except Exception:
         pos_machine = "ไม่พบ"
-    
+
     return {
         "date": date_str, "time": time_val, "branch": branch, "name": name,
         "total_amount": total, "cash": 0.0, "change": 0.0,
-        "pos_id": pos_id, "pos_machine": pos_machine, 
-        "pos_id": pos_id, "rcpt_no": rcpt_no, "tax_id": tax_id, "user": user,
+        "pos_id": pos_id, "pos_machine": pos_machine,
+        "rcpt_no": rcpt_no, "tax_id": tax_id, "user": user,
     }
     
 

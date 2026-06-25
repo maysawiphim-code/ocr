@@ -1059,14 +1059,25 @@ item_pattern = re.compile(r'(\d+)\s+(.+?)\s+(\d+\.\d{2})')
 
 def parse_ocr_to_items(raw_text):
     items = []
+    # ใช้ Regex ที่มองหา: [เลขจำนวน] + [ชื่อสินค้า] + [ตัวเลขราคา]
+    # รูปแบบนี้จะครอบคลุมถึงชื่อสินค้าที่ OCR อ่านเพี้ยนด้วย
+    pattern = re.compile(r'(\d+)\s+(.+?)\s+(\d+\.\d{2})')
+    
     lines = raw_text.split('\n')
     for line in lines:
-        match = item_pattern.search(line)
+        line = line.strip()
+        # ตัดบรรทัดที่ไม่เกี่ยวข้องออก (ถ้ามีคำเหล่านี้มักไม่ใช่รายการสินค้า)
+        if any(bad_word in line for bad_word in ["ยอดรวม", "วันที่", "สาขา", "เลขที่"]):
+            continue
+            
+        match = pattern.search(line)
         if match:
             items.append({
                 "ชื่อสินค้า": match.group(2).strip(),
                 "จำนวน": match.group(1),
                 "ราคาสุทธิ": float(match.group(3))
+            })
+    return items
             })
     return items
 def parse_price(s: str) -> float:

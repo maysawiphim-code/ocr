@@ -1446,7 +1446,18 @@ def _merge_gdrive_lines(lines: list) -> list:
             l = l.strip()
             if not l: continue
             if _kw_amount.search(l): break
-            if _kw_count.search(l): continue
+            if _kw_count.search(l):
+                skip_next_after_count = True
+                continue
+            if skip_next_after_count and _price_only.match(l):
+                skip_next_after_count = False
+                continue  # ข้าม subtotal เช่น "80.00"
+            skip_next_after_count = False
+            clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
+            if _price_only.match(l) and clean:
+                clean = re.sub(r'^-\s*', '', clean).strip()
+                if not raw_prices or raw_prices[-1] != clean:
+                    raw_prices.append(clean)
             clean = re.sub(r'\s*[Vv]\s*$', '', l).strip()
             if _price_only.match(l) and clean:
                 clean = re.sub(r'^-\s*', '', clean).strip()
@@ -1464,10 +1475,13 @@ def _merge_gdrive_lines(lines: list) -> list:
             l = l.strip()
             if not l: continue
             if _kw_amount.search(l): break
+            if _kw_count.search(l): continue
+            # "-40.00" → ส่วนลด
             m_disc = re.match(r'^-\s*(\d+[.,]\d{2})\s*$', l)
             if m_disc:
                 merged.append(f"1 ส่วนลด -{m_disc.group(1)}")
-
+             elif re.search(r'โปรโมชั่น|promotion', l, re.IGNORECASE):
+                merged.append(l)
         after_block = []
         found_kw = False
         for l in price_lines:

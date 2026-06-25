@@ -1086,7 +1086,6 @@ def extract_items_with_gemini(raw_text: str) -> list:
 
 def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
     if ocr_source == "gdrive":
-        if ocr_source == "gdrive":
         format_hint = """รูปแบบข้อมูล (Google Drive OCR แยกราคาเป็นบรรทัดใหม่):
 - บรรทัด 1: จำนวน ชื่อสินค้า  (เช่น "1 Bao ลาเต้เย็น" หรือ "1 PFPเต้าหู้ 120g")
 - บรรทัด 2: ราคาต่อหน่วย  (เช่น "40.00")

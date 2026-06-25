@@ -1102,6 +1102,11 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - รูปแบบ: จำนวน ชื่อสินค้า ราคาต่อหน่วย ราคารวม  (เช่น "1 คาราบาวแดง 12.00 12.00")
 - หรือ: จำนวน ชื่อสินค้า ราคา  (เช่น "2 น้ำดื่ม 10.00 20.00")
 - OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด
+- บางครั้ง OCR รวมสินค้าหลายรายการและ "จำนวนสินค้ารวมXรายการ" ไว้บรรทัดเดียว เช่น:
+  "1 สกินแม็บยาสีฟัน 1 Bigsmileแปรงคนจัดฟัน จานวนสินค้ารวม2รายการ"
+  → ให้แยกเป็น 2 items: "1 สกินแม็บยาสีฟัน" และ "1 Bigsmileแปรงคนจัดฟัน"
+  → "จำนวนสินค้ารวมXรายการ" ไม่ใช่สินค้า ให้ตัดทิ้ง
+- บรรทัด "-40.00" หลังโปรโมชั่น คือส่วนลด ไม่ใช่สินค้า ให้ข้ามไป
 - บางครั้ง OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo" — ให้แปลงเป็น "Bao" เสมอ
 - บรรทัด "- 50.00" หรือ "- 50.00 V" คือราคาของสินค้าบรรทัดก่อนหน้า ไม่ใช่ส่วนลด
 - บรรทัดที่มี "-40.00" หรือ "โปรโมชั่น" คือส่วนลด ให้ข้ามไป ไม่ใช่สินค้า
@@ -1152,6 +1157,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - pos_id: ต้องเป็นตัวเลข 5 หลักของสาขา (เช่น 01275, 01179, 01417)
 - cash/change: เงินสด/เงินทอน
 - ถ้าหาข้อมูลไม่เจอให้ใส่ "" หรือ 0.0
+- ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการเสมอ
+- ราคาของแต่ละสินค้าให้จับคู่ตามลำดับ: สินค้า 1 → ราคาชุดแรก, สินค้า 2 → ราคาชุดที่ 2
 - จำนวนสินค้ารวม N รายการ ในบิล = ต้องได้ items ครบ N รายการ"""
 
     try:
@@ -1659,6 +1666,7 @@ def _merge_gdrive_lines(lines: list) -> list:
         i = 0
         while i < len(lines):
             line = lines[i].strip()
+            line = re.sub(r'จ[ํา]?นวนสินค[้า]?[่า]?รวม\s*\w*\s*รายการ', '', line).strip()
             if _kw_amount.search(line) and not _RE_PRICE.search(line):
                 j = i + 1
                 if j < len(lines):
@@ -1736,9 +1744,9 @@ def _merge_gdrive_lines(lines: list) -> list:
                         if part: combined += " " + part
                         price_count += 1
                         j += 1
-                    elif re.match(r'^-\s*\d+[.,]\d{2}', nx.strip()):
-                        # "- 50.00" คือราคา ไม่ใช่สินค้า
-                        part = re.sub(r'^-\s*', '', nx.strip())
+                    elif re.match(r'^-\s*\d+[.,]\d{2}\s*[Vv]?\s*$', nx):
+                        # "- 50.00" หรือ "- 50.00 V" คือราคา ไม่ใช่ส่วนลด
+                        part = re.sub(r'^-\s*', '', nx)
                         part = re.sub(r'\s*[Vv]\s*$', '', part).strip()
                         if part: combined += " " + part
                         price_count += 1
@@ -1770,7 +1778,7 @@ def extract_items_cj(text: str) -> list:
                "เงินสด","เงินเด","ในสต",
                "เงินทอน","เงินบน","QR ธนาคาร","QRธนาคาร",
                "จำนวนสินค้า","จำนวนรายการ","จานวนสินค้า","จํานวนสินค้า",
-               "จํานวนสินค้ารวม","จำนวนสินค้ารวม"]
+               "จํานวนสินค้ารวม","จำนวนสินค้ารวม","จานวนสินค่ารวม"]
     skip_kw = ["BNO","8NO","POS","TAX","INCLUDED","ใบเสร็จ","โปรโม",
                "ส่วนลด","แต้ม","แต่ม","ขอบคุณ","สาขา","RECEIPT","INVOICE",
                "สมาชิก","ID:","หวานน้อย","ลดน้ำตาล",
@@ -1797,8 +1805,12 @@ def extract_items_cj(text: str) -> list:
         if not line: continue
         compact = _collapse(line)
 
-        if any(k in line or k in compact for k in stop_kw): break
+        has_stop = any(k in line or k in compact for k in stop_kw)
+        has_item_pattern = bool(_full.match(lf) or _fb_a.match(lf) or _fb_b.match(lf) or _fb_c.match(lf))
+        if has_stop and not has_item_pattern:
+            break
         if re.search(r'จ.{0,3}นวนส', compact): break
+        if re.search(r'จ.{0,3}นวนสินค.{0,3}รวม', compact): break
         if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
         if any(k.lower() in compact.lower() for k in skip_kw): continue
         if _RE_DATE.search(line): continue

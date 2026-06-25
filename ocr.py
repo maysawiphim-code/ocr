@@ -1055,7 +1055,20 @@ _RE_PRICE  = re.compile(r'(\d{1,6}[.,]\d{2})')
 _RE_DATE   = re.compile(r'(\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4})')
 _RE_TIME   = re.compile(r'\b([01]\d|2[0-3])[:.:]([0-5]\d)\b')
 _RE_TAX_ID = re.compile(r'TAX\s*(?:ID|1D|10|lD|id)?\s*[:\s]?\s*(\d{10,13})', re.IGNORECASE)
+item_pattern = re.compile(r'(\d+)\s+(.+?)\s+(\d+\.\d{2})')
 
+def parse_ocr_to_items(raw_text):
+    items = []
+    lines = raw_text.split('\n')
+    for line in lines:
+        match = item_pattern.search(line)
+        if match:
+            items.append({
+                "ชื่อสินค้า": match.group(2).strip(),
+                "จำนวน": match.group(1),
+                "ราคาสุทธิ": float(match.group(3))
+            })
+    return items
 def parse_price(s: str) -> float:
     if not s: return 0.0
     s = str(s).strip()

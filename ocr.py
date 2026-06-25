@@ -1103,6 +1103,9 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - หรือ: จำนวน ชื่อสินค้า ราคา  (เช่น "2 น้ำดื่ม 10.00 20.00")
 - OCR อาจทำให้ตัวอักษรผิดเพี้ยน ให้พยายามอ่านให้ได้มากที่สุด
 - บางครั้ง OCR อ่านชื่อ Bao ผิดเป็น "Beo", "B80", "Be0", "Bo" — ให้แปลงเป็น "Bao" เสมอ
+- บรรทัด "- 50.00" หรือ "- 50.00 V" คือราคาของสินค้าบรรทัดก่อนหน้า ไม่ใช่ส่วนลด
+- บรรทัดที่มี "-40.00" หรือ "โปรโมชั่น" คือส่วนลด ให้ข้ามไป ไม่ใช่สินค้า
+- บรรทัด "1 สินค้า ก 1 สินค้า ข" ให้แยกเป็น 2 รายการ
 - ชื่อสินค้าที่ OCR อ่านผิดให้แก้โดยเปรียบเทียบกับสินค้าในร้านสะดวกซื้อไทย:
   "ยูโร ติก สสสตางค" → "ยูโรติก สติ๊กสตางค์" → หมวด อาหารพร้อมทานและเบเกอรี่
   "มาม่า หมุน" → "มาม่า หมูสับ" → หมวด อาหารพร้อมทานและเบเกอรี่"""
@@ -1577,7 +1580,11 @@ def extract_receipt(text: str) -> dict:
         if m:
             candidate = re.sub(r'^\d+\s*[xXP]?\s*', '', line[:m.start()]).strip()
             if len(candidate) >= 2: name = candidate; break
-            pos_machine = _find_pos_machine_id(text, compact)
+            try:
+        pos_machine = _find_pos_machine_id(text, compact)
+    except Exception:
+        pos_machine = "ไม่พบ"
+    
     return {
         "date": date_str, "time": time_val, "branch": branch, "name": name,
         "total_amount": total, "cash": 0.0, "change": 0.0,

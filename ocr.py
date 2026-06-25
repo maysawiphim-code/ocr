@@ -1254,8 +1254,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
   "date": "วัน/เดือน/ปี",
   "time": "HH:MM",
   "branch": "ชื่อสาขา",
-  "pos_id": str(data.get("pos_id", "ไม่พบ")),
-  "pos_machine":  _find_pos_machine_id(raw_text, _collapse(raw_text)),  # ← เพิ่ม
+  "pos_id": "รหัสสาขา 4 หลัก จาก BNO",
   "rcpt_no": "เลขที่ใบเสร็จ",
   "total_amount": 0.0,
   "cash": 0.0,
@@ -2469,7 +2468,7 @@ def run_batch_mode_ui():
     else:
         S["batch_bills_per_image"] = 1
 
-    auto_detect = st.checkbox(...)
+    
     auto_detect = st.checkbox(
         "🪄 ตรวจจับหลายใบเสร็จในภาพเดียวอัตโนมัติ + ทำพื้นหลังขาว",
         value=False, key="batch_auto_detect")

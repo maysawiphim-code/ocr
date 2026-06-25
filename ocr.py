@@ -1078,8 +1078,6 @@ def parse_ocr_to_items(raw_text):
                 "ราคาสุทธิ": float(match.group(3))
             })
     return items
-            })
-    return items
 def parse_price(s: str) -> float:
     if not s: return 0.0
     s = str(s).strip()

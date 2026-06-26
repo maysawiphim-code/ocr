@@ -709,7 +709,7 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini API
 # ─────────────────────────────────────────────────────────────────────────────
-# GEMINI_API_URL defined above in ocr.py (_GEMINI_API_URL)
+_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 def _get_gemini_key() -> str:
     try:
@@ -2784,7 +2784,7 @@ def main():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # ─── ตั้งค่า ──────────────────────────────────────────────────────────────────
-# GEMINI_API_URL defined above in ocr.py (_GEMINI_API_URL)
+# _GEMINI_API_URL defined above
 SUPPORTED_EXT  = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
 SLEEP_BETWEEN  = 1.2   # วินาที ระหว่างแต่ละ request (safe สำหรับ free tier 15 RPM)
 MAX_RETRY      = 3     # retry สูงสุด

@@ -2649,24 +2649,10 @@ def main():
 
     render_steps()
 
-    st.markdown(f'<p class="sec-header" style="margin-top:1rem">{t("count_label")}</p>',
-                unsafe_allow_html=True)
-    cc1, cc2, cc3 = st.columns(3)
-    for n, col in [(1,cc1),(2,cc2),(3,cc3)]:
-        with col:
-            is_on = S.bill_count == n
-            if st.button(
-                f"{'✅ ' if is_on else ''}{t(f'b{n}')}\n_{t(f'b{n}s')}_",
-                use_container_width=True, key=f"cnt{n}",
-                type="primary" if is_on else "secondary"):
-                S.bill_count=n; S.step=2
-                S.gallery_files=[]; S.selected_idx=-1
-                S.crop_result=None; S.all_bills=[]
-                S.manual_splits_px=None; S.crop_applied=False
-                st.rerun()
+    # 1 บิลต่อรูปเสมอ (ตัด 2/3 บิล ออก)
     if S.bill_count == 0:
-        st.info("👆 กรุณาเลือกจำนวนบิลก่อน")
-        return
+        S.bill_count = 1
+        S.step = 2
     st.divider()
 
     st.markdown(f'<p class="sec-header">{t("upload_label")}</p>', unsafe_allow_html=True)
@@ -2730,8 +2716,8 @@ def main():
             mode_key = "a4" if t("crop_a4") in mode_choice else "free"
             st.info(t("crop_hint"))
         with crop_col:
-            st_html(crop_component_html(pil_orig, mode_key, bill_count=S.bill_count),
-                height=360 if S.bill_count > 1 else 320, scrolling=False)
+            st_html(crop_component_html(pil_orig, mode_key, bill_count=1),
+                height=320, scrolling=False)  # 1 บิลต่อรูป
 
         st.markdown("**📋 วางข้อมูล Crop ที่คัดลอกจากด้านบน:**")
         paste_col, btn_col = st.columns([4,1])
@@ -2758,14 +2744,7 @@ def main():
         cw = mc[2].number_input("W (px)", 1, w0, cw if cw>0 else w0, key="cw")
         ch = mc[3].number_input("H (px)", 1, h0, ch if ch>0 else h0, key="ch")
 
-        if S.bill_count > 1:
-            st.caption("จุดตัดบิล (พิกเซล X — คั่นด้วยจุลภาค):")
-            default_splits_str = ", ".join(str(p) for p in parsed_splits) if parsed_splits else ""
-            splits_str = st.text_input("จุดตัดบิล", value=default_splits_str, key="splits_input",
-                                        label_visibility="collapsed",
-                                        placeholder="เช่น 300, 560  (เว้นว่าง = ให้ระบบเดาเอง)")
-        else:
-            splits_str = ""
+        splits_str = ""  # 1 บิลต่อรูป — ไม่มี multi-bill splits
 
         bc1, bc2 = st.columns(2)
         with bc1:
@@ -2811,25 +2790,8 @@ def main():
         fname_active = (S.gallery_files[S.selected_idx][0]
                         if 0 <= S.selected_idx < len(S.gallery_files) else "image")
 
-        if S.bill_count > 1:
-            # แสดง crop preview ก่อนกดวิเคราะห์
-            if S.manual_splits_px:
-                preview_crops = split_by_positions(img_cv_preview, S.manual_splits_px)
-            else:
-                preview_crops = split_receipts_image(img_cv_preview, n_expected=S.bill_count)
-            if len(preview_crops) < S.bill_count:
-                preview_crops = preview_crops + [img_cv_preview] * (S.bill_count - len(preview_crops))
-            preview_crops = preview_crops[:S.bill_count]
-
-            st.markdown(f"**✂️ ตัดออกมาได้ {len(preview_crops)} บิล — ตรวจสอบก่อนวิเคราะห์:**")
-            prev_cols = st.columns(len(preview_crops))
-            for ci, crop_cv in enumerate(preview_crops):
-                with prev_cols[ci]:
-                    crop_blur = _check_blur(crop_cv)
-                    crop_pil = cv_to_pil(crop_cv)
-                    st.image(crop_pil, caption=f"บิล {ci+1}", use_container_width=True)
-                    if crop_blur < 30:
-                        st.warning("⚠️ รูปไม่ชัด", icon="⚠️")
+        if False:  # ✂️ ตัด multi-bill preview ออก
+            pass
         else:
             # 1 บิล: preview เล็กๆ
             col_img, col_info = st.columns([1, 3])
@@ -2844,10 +2806,7 @@ def main():
 
         engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
                         "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
-        if S.bill_count == 1:
-            st.caption(f"Engine: **{engine_label}** | blur score: {blur_score:.0f}")
-        else:
-            st.caption(f"Engine: **{engine_label}**")
+        st.caption(f"Engine: **{engine_label}** | blur score: {blur_score:.0f}")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
                 with st.spinner("กำลัง OCR..."):
@@ -2857,79 +2816,36 @@ def main():
                              if 0 <= S.selected_idx < len(S.gallery_files) else "image")
                     progress = st.progress(0, text="เริ่มต้น OCR...")
 
-                    if S.ocr_engine == "gdrive" and S.bill_count > 1:
-                        if S.manual_splits_px:
-                            crops = split_by_positions(img_cv, S.manual_splits_px)
-                        else:
-                            crops = split_receipts_image(img_cv, n_expected=S.bill_count)
-                        if len(crops) < S.bill_count:
-                            crops = crops + [img_cv] * (S.bill_count - len(crops))
-                        crops = crops[:S.bill_count]
+                    # 1 บิลต่อรูปเสมอ
+                    crops = [img_cv]
 
-                        for ci, crop in enumerate(crops):
-                            label = f"{fname} — บิล {ci+1}"
-                            progress.progress(ci / len(crops),
-                                text=f"📤 Google Drive OCR บิล {ci+1}/{len(crops)}...")
-                            st.session_state["_gdrive_raw_texts"] = []
-                            text       = run_ocr(crop, engine="gdrive")
-                            gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                            text_for_gemini = gdrive_raw if gdrive_raw else text
-                            if is_gemini_configured() and text_for_gemini.strip():
-                                progress.progress((ci + 0.5) / len(crops),
-                                    text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
-                                gemini_result = extract_with_gemini(text_for_gemini, ocr_source="gdrive")
-                                if gemini_result["ok"] and gemini_result["items"]:
-                                    bill  = gemini_result["bill"]
-                                    items = gemini_result["items"]
-                                else:
-                                    bill  = extract_receipt(text)
-                                    items = extract_items_cj(text)
+                    for ci, crop in enumerate(crops):
+                        label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
+                        progress.progress((ci) / len(crops),
+                            text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
+                        st.session_state["_gdrive_raw_texts"] = []
+                        text       = run_ocr(crop, engine=S.ocr_engine)
+                        gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+                        if is_gemini_configured() and text_for_gemini.strip():
+                            progress.progress((ci + 0.5) / len(crops),
+                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
+                            gemini_result = extract_with_gemini(
+                                text_for_gemini,
+                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract")
+                            if gemini_result["ok"] and gemini_result["items"]:
+                                bill  = gemini_result["bill"]
+                                items = gemini_result["items"]
                             else:
                                 bill  = extract_receipt(text)
                                 items = extract_items_cj(text)
-                            all_bills.append({"filename": label, "bill": bill, "items": items,
-                                              "raw_text": text, "gdrive_raw": gdrive_raw,
-                                              "image": img_to_bytes_png(crop)})
-                        progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
-
-                    else:
-                        if S.bill_count == 1:
-                            crops = [img_cv]
-                        elif S.manual_splits_px:
-                            crops = split_by_positions(img_cv, S.manual_splits_px)
                         else:
-                            crops = split_receipts_image(img_cv, n_expected=S.bill_count)
-                        if len(crops) < S.bill_count:
-                            crops = crops + [img_cv] * (S.bill_count - len(crops))
-                        crops = crops[:S.bill_count]
-
-                        for ci, crop in enumerate(crops):
-                            label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
-                            progress.progress((ci) / len(crops),
-                                text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
-                            st.session_state["_gdrive_raw_texts"] = []
-                            text       = run_ocr(crop, engine=S.ocr_engine)
-                            gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                            text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
-                            if is_gemini_configured() and text_for_gemini.strip():
-                                progress.progress((ci + 0.5) / len(crops),
-                                    text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
-                                gemini_result = extract_with_gemini(
-                                    text_for_gemini,
-                                    ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract")
-                                if gemini_result["ok"] and gemini_result["items"]:
-                                    bill  = gemini_result["bill"]
-                                    items = gemini_result["items"]
-                                else:
-                                    bill  = extract_receipt(text)
-                                    items = extract_items_cj(text)
-                            else:
-                                bill  = extract_receipt(text)
-                                items = extract_items_cj(text)
-                            all_bills.append({"filename":label,"bill":bill,"items":items,
-                                              "raw_text":text,"gdrive_raw":gdrive_raw,
-                                              "image":img_to_bytes_png(crop)})
-                        progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
+                            bill  = extract_receipt(text)
+                            items = extract_items_cj(text)
+                        all_bills.append({"filename":label,"bill":bill,"items":items,
+                                          "raw_text":text,"gdrive_raw":gdrive_raw,
+                                          "image":img_to_bytes_png(crop)})
+                    progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
 
                     S.all_bills = all_bills; S.step=4; st.rerun()
 
@@ -2939,9 +2855,9 @@ def main():
         dl_c, rs_c = st.columns([3,1])
         with dl_c:
             st.download_button(t("download"), data=build_excel(S.all_bills),
-                               file_name="receipts.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+                           file_name="receipts.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           use_container_width=True)
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v

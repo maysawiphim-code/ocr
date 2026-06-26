@@ -1388,18 +1388,26 @@ def universal_item_parser(text: str) -> list:
     _SKIP_UP  = re.compile(
         r'(?:^|\s)(?:ยอดรวม|บอลรวม|บอดราม|รวมสุทธิ|รวมทั้งสิ้น|UORTIN|UORT)(?:\s|$)'
         r'|(?:^|\s)(?:เงินสด|เงินทอน|เงินเด|ในสต|เงินบน)(?:\s|$)'
-        r'|^BNO|^8NO|^BN0|^TAX|^MORE|^TAXID|^INCLUDED|^ID:|^User|^POS\s*:'
-        r'|(?:QR|OR|0R)\s*(?:ธนาคาร|[อา][ลา]?คาร)|Grab\s*Mart|^Order\s*no|^ธนาคาร'
+        r'|^BNO|^8NO|^BN0|^TAX|^MORE|^TAXID|^INCLUDED|^MAT\s*INCLUDED|^ID:|^User|^ne-User'
+        r'|^POS\s*:|^PCS\s*:'
+        r'|(?:QR|OR|0R|QRE|ORE)\s*(?:ธนาคาร|[อา][ลา]?คาร|นาค[\w]*)|Grab\s*Mart|^Order\s*no|^ธนาคาร'
         r'|^สมาชิก|^รหัสสมาชิก|^แต้ม|^เติม|^ขอบคุณ|^ร้องเรียน|^RECEIPT|^INVOICE'
         r'|^บาว\s*คาเฟ|^ลูกค้าสามารถ|^\*แต้ม|^\*\s*แต้ม',
         re.IGNORECASE)
-    _KCOUNT   = re.compile(r'(?:[สจ].{0,6}|นวน)สินค[้า]?.{0,3}ร[าว][มน]', re.IGNORECASE)
+    _KCOUNT   = re.compile(
+        r'(?:[สจ].{0,6}|นวน|แวน|แจน|ลาน|ชํา)สินค[้า]?.{0,3}ร[าว][มน]'
+        r'|[นจสแลช].{0,5}(?:นค้า|ค้า|สค้า|สนค้า|ค่า|สนค่า)ร[าว][มน]'
+        r'|ลานาน.{0,5}ร[าว][มน]'  # ลานาน น าราม
+        r'|(?:^|\s)-?\s*(?:[สจนแลช]).{0,6}(?:สินค|นค|ค้า|สนค)ร[าว][มน]',
+        re.IGNORECASE)
     _PROMO    = re.compile(r'โปรโมชั่น|promotion', re.IGNORECASE)
     _DISC     = re.compile(r'^ส่วนลด\s*$|^สวนลด\s*$', re.IGNORECASE)
     _NOTE     = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG]ml?)\s*$', re.IGNORECASE)
 
     def _norm_digits(s):
-        s = re.sub(r'\bl(\d)', r'1\1', s)           # l2 → 12
+        # comma separator ในราคา เช่น "1,000.00" → "1000.00"
+        s = re.sub(r'(\d{1,3}),(\d{3}[.,])', r'\1\2', s)
+        s = re.sub(r'\b[lI]([Oo\d])', r'1\1', s)   # l/I + digit/O → 1x
         s = re.sub(r'(\d)[Oo]([.,])', r'\g<1>0\2', s) # 2O. → 20.
         s = re.sub(r'(\d+[.,])[Oo]{2}', r'\g<1>00', s) # 12.OO → 12.00
         s = re.sub(r'(\d+[.,])[Oo]', r'\g<1>0', s)    # 12.O → 12.0
@@ -1424,7 +1432,7 @@ def universal_item_parser(text: str) -> list:
             results.append(_pp(m.group(1)))
         if results: return results
         # 2. 12 00 (space แทน dot เช่น "12 00")
-        for m in re.finditer(r'(?<![.\d])(\d{1,5})\s+(\d{2})(?=\s|[Vv]|$)', s):
+        for m in re.finditer(r'(?<![.\dก-๙A-Za-z])(\d{1,5})\s+(\d{2})(?=\s|[Vv]|$)', s):
             results.append(_pp(f"{m.group(1)}.{m.group(2)}"))
         if results: return results
         # 3. "6 6 V" (same number × 2, qty=1)
@@ -1463,7 +1471,7 @@ def universal_item_parser(text: str) -> list:
             _NOTE.match(s) or
             re.search(r'แต้มสะสม|แต้มหมด|แต้มครั้ง|เติมสะสม|เติมครั้ง',s) or
             re.match(r'^\d+(?:แต้ม|เติม|แต่ม)',s) or
-            re.search(r'User\w+.*POS|BNO[:\s.]',s,re.IGNORECASE) or  # User+BNO ปนกลาง
+            re.search(r'(?:ne-)?User\w+.*(?:POS|PCS)|BNO[:\s.]',s,re.IGNORECASE) or  # User+BNO ปนกลาง
             re.match(r'^(?:QR|OR|0R|Grab)\s*$',s,re.IGNORECASE) or   # payment keyword เดี่ยว
             re.match(r'^\d+[.,]\d{2}\s*บาท\s*$',s) or              # "40.00 บาท" → ยอดชำระ
             re.match(r'^\d{5,}$',lc)
@@ -1473,6 +1481,8 @@ def universal_item_parser(text: str) -> list:
     lines = []
     for l in text.split('\n'):
         l = re.sub(r'\bสวนลด\b','ส่วนลด',l.strip())
+        l = re.sub(r'\bBag(?=[_\s])','Bao',l,flags=re.IGNORECASE)  # Bag → Bao
+        l = re.sub(r'\bBAO(?=[_\s])','Bao',l)  # BAO → Bao
         l = re.sub(r'\bจานวนสินค[้า]?รวม','จำนวนสินค้ารวม',l)
         l = re.sub(r'\s*[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$','',l,flags=re.IGNORECASE).strip()
         l = _norm_digits(l)
@@ -1990,7 +2000,6 @@ def build_excel(all_bills: list) -> bytes:
                 "ไฟล์":           b['filename'],
                 "วันที่":          d['date'],
                 "เวลา":           d['time'],
-                "สาขา":           d['branch'],
                 "รหัสสาขา":       d['pos_id'],
                 "POS ID":         d.get('pos_machine',''),
                 "เลขที่ใบเสร็จ":  d['rcpt_no'],
@@ -2043,14 +2052,14 @@ def build_excel(all_bills: list) -> bytes:
             })
             rows.append(summary)
         # column order
-        cols = ["ไฟล์","วันที่","เวลา","สาขา","รหัสสาขา","POS ID","เลขที่ใบเสร็จ",
+        cols = ["ไฟล์","วันที่","เวลา","รหัสสาขา","POS ID","เลขที่ใบเสร็จ",
                 "ชื่อสินค้า","หมวดหมู่","จำนวน","ราคาต่อหน่วย","ยอดรวมสินค้า",
                 "ชื่อส่วนลด/โปรโม","มูลค่าส่วนลด","ยอดรวม"]
         df = pd.DataFrame(rows, columns=cols)
         df.to_excel(writer, index=False, sheet_name='ใบเสร็จ')
         # จัด column width
         ws = writer.sheets['ใบเสร็จ']
-        widths = [20,12,8,20,10,8,22, 28,18,6,12,12, 28,12,10]
+        widths = [20,12,8,10,8,22, 28,18,6,12,12, 28,12,10]
         for i, w in enumerate(widths, 1):
             from openpyxl.utils import get_column_letter
             ws.column_dimensions[get_column_letter(i)].width = w

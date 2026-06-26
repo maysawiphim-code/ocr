@@ -3213,11 +3213,12 @@ def _batch_main():
     parser.add_argument("--merge",  "-m", type=Path, help="โฟลเดอร์ JSON ที่จะ merge")
     parser.add_argument("--excel",  "-e", type=Path, help="ไฟล์ Excel/CSV ที่จะบันทึก")
     parser.add_argument("--batch",  "-b", type=int,  help="จำนวนรูปต่อ batch (default=100)", default=100)
-    parser.add_argument("--sleep",  "-s", type=float,help=f"วินาทีระหว่าง request (default={SLEEP_BETWEEN})", default=SLEEP_BETWEEN)
+    parser.add_argument("--sleep",  "-s", type=float,
+                        help=f"วินาทีระหว่าง request (default={SLEEP_BETWEEN})",
+                        default=SLEEP_BETWEEN)
 
     args = parser.parse_args()
 
-    global SLEEP_BETWEEN
     SLEEP_BETWEEN = args.sleep
 
     if not args.input and not args.merge:

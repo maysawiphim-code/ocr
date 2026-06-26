@@ -712,11 +712,33 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 _GEMINI_API_URL      = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 _GEMINI_API_URL_LITE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 
-def _get_gemini_key() -> str:
+# ── Gemini Key Pool (round-robin เพื่อเพิ่ม RPM) ──────────────────────────────
+_gemini_key_index = 0
+
+def _get_gemini_keys() -> list:
+    """อ่าน API keys ทั้งหมด รองรับหลาย key คั่นด้วย , หรือ newline"""
     try:
-        return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+        raw = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
     except Exception:
-        return os.environ.get("GEMINI_API_KEY", "")
+        raw = os.environ.get("GEMINI_API_KEY", "")
+    # แยก keys (คั่นด้วย , หรือ newline)
+    keys = [k.strip() for k in re.split(r"[,\n]+", raw) if k.strip()]
+    return keys
+
+def _get_gemini_key() -> str:
+    """คืน key แรกที่มี"""
+    keys = _get_gemini_keys()
+    return keys[0] if keys else ""
+
+def _get_next_key() -> str:
+    """Round-robin เลือก key ถัดไป"""
+    global _gemini_key_index
+    keys = _get_gemini_keys()
+    if not keys:
+        return ""
+    key = keys[_gemini_key_index % len(keys)]
+    _gemini_key_index += 1
+    return key
 
 def is_gemini_configured() -> bool:
     return bool(_get_gemini_key().strip())
@@ -2576,10 +2598,16 @@ def main():
         if nl != S.lang: S.lang = nl; st.rerun()
 
     # ── Gemini API status ─────────────────────────────────────────────────────
-    S.ocr_engine = "gemini"   # ใช้ Gemini Vision เสมอ
-    gemini_ready = is_gemini_configured()
-    if gemini_ready:
-        st.success("✅ Gemini API พร้อมใช้งาน — ฟรี 1,500 requests/วัน")
+    S.ocr_engine = "gemini"
+    keys = _get_gemini_keys()
+    n_keys = len(keys)
+    if n_keys >= 2:
+        st.success(f"✅ Gemini API พร้อม — **{n_keys} keys** (RPM รวม ~{n_keys*15} req/นาที) 🚀")
+    elif n_keys == 1:
+        st.success("✅ Gemini API พร้อม — 1 key (15 RPM)")
+        st.info("💡 **เพิ่มความเร็ว:** ใส่หลาย API key ใน secrets.toml\n"
+                "```toml\nGEMINI_API_KEY = \"key1,key2,key3,key4\"\n```\n"
+                "4 key ฟรี = 60 RPM = เร็วขึ้น 4 เท่า สมัคร key เพิ่มที่ aistudio.google.com")
     else:
         st.warning("⚠️ ยังไม่ได้ตั้งค่า GEMINI_API_KEY\n"
                    "เพิ่มใน `.streamlit/secrets.toml`: `GEMINI_API_KEY = 'your-key'`")
@@ -2713,11 +2741,9 @@ def main():
         if blur_score < 30:
             st.warning(f"⚠️ รูปไม่ชัด (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
 
-        # แสดงขนาดรูปและ model
         w_orig, h_orig = working_pil.size
-        max_side = max(w_orig, h_orig)
-        resize_note = f" → resize เป็น 1024px" if max_side > 1024 else " (ขนาดพอดี)"
-        st.caption(f"Engine: **✨ Gemini 2.0 Flash-Lite Vision** | รูป: {w_orig}×{h_orig}px{resize_note}")
+        resize_note = " → resize 1024px" if max(w_orig,h_orig) > 1024 else ""
+        st.caption(f"✨ Gemini Flash-Lite | Files API + Key Rotation | {w_orig}×{h_orig}px{resize_note}")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
             if not is_gemini_configured():
@@ -2827,6 +2853,67 @@ def image_to_base64(path: Path) -> tuple[str, str]:
     return data, media_type
 
 
+_FILES_API_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+_file_uri_cache: dict = {}   # cache: md5 → file_uri (ไม่ upload ซ้ำรูปเดิม)
+
+def _upload_to_files_api(img_bytes: bytes, api_key: str) -> str:
+    """อัปโหลดรูปไปยัง Gemini Files API → คืน file_uri
+    ถ้า upload ไม่สำเร็จ คืน "" (fallback base64)
+    """
+    import hashlib
+    import requests as _req
+
+    # ตรวจ cache ก่อน (รูปเดิมไม่ต้อง upload ซ้ำ)
+    digest = hashlib.md5(img_bytes).hexdigest()
+    if digest in _file_uri_cache:
+        return _file_uri_cache[digest]
+
+    try:
+        # Step 1: initiate upload
+        init_resp = _req.post(
+            f"{_FILES_API_UPLOAD}?key={api_key}",
+            headers={
+                "X-Goog-Upload-Protocol": "resumable",
+                "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": str(len(img_bytes)),
+                "X-Goog-Upload-Header-Content-Type": "image/jpeg",
+                "Content-Type": "application/json",
+            },
+            json={"file": {"display_name": f"receipt_{digest[:8]}"}},
+            timeout=15,
+        )
+        if init_resp.status_code not in (200, 308):
+            return ""
+
+        upload_url = init_resp.headers.get("X-Goog-Upload-URL", "")
+        if not upload_url:
+            return ""
+
+        # Step 2: upload bytes
+        up_resp = _req.post(
+            upload_url,
+            headers={
+                "Content-Length": str(len(img_bytes)),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+                "Content-Type": "image/jpeg",
+            },
+            data=img_bytes,
+            timeout=30,
+        )
+        if up_resp.status_code not in (200, 308):
+            return ""
+
+        file_info = up_resp.json()
+        uri = file_info.get("file", {}).get("uri", "")
+        if uri:
+            _file_uri_cache[digest] = uri   # cache ไว้
+        return uri
+
+    except Exception:
+        return ""   # fallback base64
+
+
 def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
     """ส่งรูปให้ Gemini Vision พร้อม retry + exponential backoff
     รับได้ทั้ง image_path (Path) หรือ pil_image (PIL.Image)
@@ -2834,82 +2921,82 @@ def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
     import requests
 
     import io as _io
+
+    # ── เตรียมรูป: resize ไม่เกิน 1024px ──────────────────────────────────────
     if pil_image is not None:
         src = pil_image
     else:
         src = Image.open(image_path).convert("RGB")
 
-    # ── resize ก่อนส่ง: ไม่เกิน 1024px ด้านยาว (ลด payload 5-10x) ──
     W, H = src.size
-    MAX_SIDE = 1024
-    if max(W, H) > MAX_SIDE:
-        scale = MAX_SIDE / max(W, H)
-        src = src.resize((int(W * scale), int(H * scale)), Image.LANCZOS)
+    if max(W, H) > 1024:
+        scale = 1024 / max(W, H)
+        src = src.resize((int(W*scale), int(H*scale)), Image.LANCZOS)
 
     buf = _io.BytesIO()
     src.save(buf, format="JPEG", quality=80)
-    img_data   = base64.b64encode(buf.getvalue()).decode("utf-8")
-    media_type = "image/jpeg"
+    img_bytes = buf.getvalue()
+
+    # ── ลอง Files API ก่อน (เร็วกว่า) → fallback base64 ─────────────────────
+    file_uri = _upload_to_files_api(img_bytes, api_key)
+    if file_uri:
+        # ส่ง URI แทน base64 (payload เล็กลง ~100x)
+        img_part = {"file_data": {"mime_type": "image/jpeg", "file_uri": file_uri}}
+    else:
+        # fallback: inline base64
+        img_data   = base64.b64encode(img_bytes).decode("utf-8")
+        img_part   = {"inline_data": {"mime_type": "image/jpeg", "data": img_data}}
 
     payload = {
         "contents": [{
-            "parts": [
-                {"inline_data": {"mime_type": media_type, "data": img_data}},
-                {"text": SYSTEM_PROMPT},
-            ]
+            "parts": [img_part, {"text": SYSTEM_PROMPT}]
         }],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000},
     }
 
-    # retry + exponential backoff — รอจนสำเร็จ ไม่ raise error
-    wait_times = [10, 20, 30, 45, 60]
-    for attempt, wait in enumerate(wait_times, 1):
-        try:
-            # ลอง flash-lite ก่อน (เร็วกว่า, RPM สูงกว่า) → fallback flash
-            _url = _GEMINI_API_URL_LITE if attempt <= 3 else _GEMINI_API_URL
-            resp = requests.post(
-                f"{_url}?key={api_key}",
-                json=payload, timeout=60,
-            )
-            if resp.status_code in (429, 503):
+    # ── Key rotation + retry ───────────────────────────────────────────────────
+    keys = _get_gemini_keys()
+    if not keys:
+        raise RuntimeError("ไม่พบ GEMINI_API_KEY")
+
+    tried_keys = set()
+    wait_sec   = 5
+
+    for attempt in range(999):
+        untried = [k for k in keys if k not in tried_keys]
+        if untried:
+            current_key = untried[0]
+        else:
+            wait_show = min(wait_sec, 60)
+            try:
                 import streamlit as _st
-                for remaining in range(wait, 0, -1):
-                    try:
-                        _st.toast(f"⏳ Rate limit — รอ {remaining}s (ครั้งที่ {attempt}/{len(wait_times)})")
-                    except Exception:
-                        pass
+                for r in range(wait_show, 0, -1):
+                    try: _st.toast(f"⏳ รอ {r}s ให้ rate limit reset ({len(keys)} key)")
+                    except: pass
                     time.sleep(1)
+            except:
+                time.sleep(wait_show)
+            tried_keys.clear()
+            wait_sec = min(wait_sec * 2, 60)
+            current_key = keys[0]
+
+        _url = _GEMINI_API_URL_LITE if attempt < len(keys) * 3 else _GEMINI_API_URL
+        try:
+            resp = requests.post(f"{_url}?key={current_key}", json=payload, timeout=60)
+            if resp.status_code == 429:
+                tried_keys.add(current_key)
                 continue
+            if resp.status_code == 503:
+                time.sleep(3); continue
             resp.raise_for_status()
             data     = resp.json()
             raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
             raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
             return json.loads(raw_text)
-
         except requests.exceptions.Timeout:
-            if attempt < len(wait_times):
-                time.sleep(wait)
-                continue
-            raise
+            time.sleep(5); continue
         except json.JSONDecodeError as e:
             raise ValueError(f"JSON parse error: {e}\nRaw: {raw_text[:300]}")
-
-    # ถ้าหมด retry ทั้งหมด → ลองอีกครั้งสุดท้ายไม่จำกัดเวลา
-    for forever in range(999):
-        time.sleep(60)
-        try:
-            resp = requests.post(f"{_GEMINI_API_URL}?key={api_key}", json=payload, timeout=60)
-            if resp.status_code == 429:
-                continue
-            resp.raise_for_status()
-            data     = resp.json()
-            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-            raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
-            return json.loads(raw_text)
-        except Exception:
-            continue
-
-    return result
 
 
 class RateLimitError(Exception):

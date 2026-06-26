@@ -1388,14 +1388,15 @@ def universal_item_parser(text: str) -> list:
     _SKIP_UP  = re.compile(
         r'(?:^|\s)(?:ยอดรวม|บอลรวม|บอดราม|รวมสุทธิ|รวมทั้งสิ้น|UORTIN|UORT)(?:\s|$)'
         r'|(?:^|\s)(?:เงินสด|เงินทอน|เงินเด|ในสต|เงินบน)(?:\s|$)'
-        r'|^BNO|^8NO|^TAX|^MORE|^TAXID|^INCLUDED|^ID:|^User|^POS\s*:|QR\s*ธนาคาร'
-        r'|^สมาชิก|^รหัสสมาชิก|^แต้ม|^ขอบคุณ|^ร้องเรียน|^RECEIPT|^INVOICE'
-        r'|^บาว\s*คาเฟ่|^ลูกค้าสามารถ',
+        r'|^BNO|^8NO|^BN0|^TAX|^MORE|^TAXID|^INCLUDED|^ID:|^User|^POS\s*:'
+        r'|(?:QR|OR|0R)\s*(?:ธนาคาร|[อา][ลา]?คาร)|Grab\s*Mart|^Order\s*no|^ธนาคาร'
+        r'|^สมาชิก|^รหัสสมาชิก|^แต้ม|^เติม|^ขอบคุณ|^ร้องเรียน|^RECEIPT|^INVOICE'
+        r'|^บาว\s*คาเฟ|^ลูกค้าสามารถ|^\*แต้ม|^\*\s*แต้ม',
         re.IGNORECASE)
-    _KCOUNT   = re.compile(r'[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน]', re.IGNORECASE)
+    _KCOUNT   = re.compile(r'(?:[สจ].{0,6}|นวน)สินค[้า]?.{0,3}ร[าว][มน]', re.IGNORECASE)
     _PROMO    = re.compile(r'โปรโมชั่น|promotion', re.IGNORECASE)
     _DISC     = re.compile(r'^ส่วนลด\s*$|^สวนลด\s*$', re.IGNORECASE)
-    _NOTE     = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot|ใบหราม)\s*$', re.IGNORECASE)
+    _NOTE     = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG]ml?)\s*$', re.IGNORECASE)
 
     def _norm_digits(s):
         s = re.sub(r'\bl(\d)', r'1\1', s)           # l2 → 12
@@ -1460,8 +1461,12 @@ def universal_item_parser(text: str) -> list:
             _KCOUNT.search(lc) or
             _RE_DATE.match(s) or
             _NOTE.match(s) or
-            re.match(r'^\d+แต้ม|แต้ม\d+|แต้มสะสม|แต้มหมด|แต้มครั้ง',s) or
-            re.match(r'^\d{5,}$',lc)  # เบอร์โทรหรือรหัสยาว
+            re.search(r'แต้มสะสม|แต้มหมด|แต้มครั้ง|เติมสะสม|เติมครั้ง',s) or
+            re.match(r'^\d+(?:แต้ม|เติม|แต่ม)',s) or
+            re.search(r'User\w+.*POS|BNO[:\s.]',s,re.IGNORECASE) or  # User+BNO ปนกลาง
+            re.match(r'^(?:QR|OR|0R|Grab)\s*$',s,re.IGNORECASE) or   # payment keyword เดี่ยว
+            re.match(r'^\d+[.,]\d{2}\s*บาท\s*$',s) or              # "40.00 บาท" → ยอดชำระ
+            re.match(r'^\d{5,}$',lc)
         )
 
     # normalize
@@ -1483,7 +1488,7 @@ def universal_item_parser(text: str) -> list:
         if not line: i+=1; continue
 
         # ตัด "ยอดรวม..." inline ออกก่อน (F59: "1 น้ำดื่ม 7.00 V ยอดรวม 7.00")
-        line_p = re.sub(r'\s*(?:ยอดรวม|บอลรวม|บอดราม)[^\n]*$', '', line, flags=re.IGNORECASE).strip() or line
+        line_p = re.sub(r'\s*(?:ยอดรวม|บอลรวม|บอดราม|รวมทั้งสิ้น)[^\n]*$', '', line, flags=re.IGNORECASE).strip() or line
         skip = _is_skip(line_p)
 
         # ── ราคาลบ standalone
@@ -1524,15 +1529,17 @@ def universal_item_parser(text: str) -> list:
         # Format B: ชื่อ+ราคาในบรรทัดเดียว
         is_qty_zero = bool(re.match(r'^\s*0\s+', line))
         if has_th and len(pline) >= 1 and not is_qty_zero:
-            nm = re.sub(r'\s*\d+[.,]\d{2}.*$','',line_p,1).strip()
+            nm = re.sub(r'\s+\d{1,6}[.,]\d{2}(?:\s+\d{1,6}[.,]\d{2})*\s*[Vv \-]*$','',line_p).strip()
             nm = _clean(nm)
             # ป้องกัน: ชื่อต้องมี alphanumeric >=2 และไม่ใช่แค่ตัวเลข
             if _nq(nm) >= 2 and not re.match(r'^\d+\.?\d*$',nm):
                 pv = pline; unit=pv[0]; total=pv[-1]
                 if total==0 or total<unit*0.3: total=unit*qty
                 if is_p: unit=-abs(unit); total=-abs(total)
-                items.append({"ชื่อสินค้า":nm,"จำนวน":qty,"ราคาต่อหน่วย":unit,"ยอดรวมสินค้า":total})
-                used.add(i); i+=1; continue
+                if total >= 5.0 or total < 0:  # filter ราคา 0 และ < 5 (ตัวเลขในชื่อ)
+                    items.append({"ชื่อสินค้า":nm,"จำนวน":qty,"ราคาต่อหน่วย":unit,"ยอดรวมสินค้า":total})
+                    used.add(i); i+=1; continue
+                # total < 5 → อาจเป็นตัวเลขในชื่อ ไม่ใช่ราคา → ตกไป Format A
 
         # Format A/C: look-ahead
         if has_th:
@@ -1565,7 +1572,8 @@ def universal_item_parser(text: str) -> list:
                     m_pamt=re.search(r'(?:ราคาพิเศษ|ลด)\s*(\d+)',nc,re.IGNORECASE)
                     if m_pamt: total=-float(m_pamt.group(1)); unit=total
                 nc = re.sub(r'^\d+\s+','',nc).strip()
-                items.append({"ชื่อสินค้า":nc,"จำนวน":qty,"ราคาต่อหน่วย":unit,"ยอดรวมสินค้า":total})
+                if total >= 5.0 or total < 0:  # filter ราคา 0 และ < 5
+                    items.append({"ชื่อสินค้า":nc,"จำนวน":qty,"ราคาต่อหน่วย":unit,"ยอดรวมสินค้า":total})
                 used.add(i)
             elif not pf:
                 # backward scan: ราคาอาจอยู่ก่อน item line

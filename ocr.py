@@ -709,7 +709,8 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini API
 # ─────────────────────────────────────────────────────────────────────────────
-_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+_GEMINI_API_URL      = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+_GEMINI_API_URL_LITE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
 
 def _get_gemini_key() -> str:
     try:
@@ -2712,7 +2713,11 @@ def main():
         if blur_score < 30:
             st.warning(f"⚠️ รูปไม่ชัด (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
 
-        st.caption("Engine: **✨ Gemini 2.0 Flash Vision**")
+        # แสดงขนาดรูปและ model
+        w_orig, h_orig = working_pil.size
+        max_side = max(w_orig, h_orig)
+        resize_note = f" → resize เป็น 1024px" if max_side > 1024 else " (ขนาดพอดี)"
+        st.caption(f"Engine: **✨ Gemini 2.0 Flash-Lite Vision** | รูป: {w_orig}×{h_orig}px{resize_note}")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
             if not is_gemini_configured():
@@ -2755,10 +2760,6 @@ def main():
                     all_bills.append({"filename": fname, "bill": bill, "items": items,
                                       "raw_text": "", "gdrive_raw": "", "image": img_bytes})
                     progress.progress(1.0, text="✅ Gemini Vision เสร็จสิ้น")
-                except RuntimeError as _e:
-                    progress.progress(1.0, text="⏳ Rate limit")
-                    st.warning(f"⏳ {_e}\n\nกด **วิเคราะห์** อีกครั้งได้เลย")
-                    st.stop()
                 except Exception as _e:
                     progress.progress(1.0, text="❌ Error")
                     st.error(f"❌ Gemini error: {_e}")
@@ -2832,14 +2833,23 @@ def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
     """
     import requests
 
+    import io as _io
     if pil_image is not None:
-        import io as _io
-        buf = _io.BytesIO()
-        pil_image.save(buf, format="JPEG", quality=85)
-        img_data   = base64.b64encode(buf.getvalue()).decode("utf-8")
-        media_type = "image/jpeg"
+        src = pil_image
     else:
-        img_data, media_type = image_to_base64(image_path)
+        src = Image.open(image_path).convert("RGB")
+
+    # ── resize ก่อนส่ง: ไม่เกิน 1024px ด้านยาว (ลด payload 5-10x) ──
+    W, H = src.size
+    MAX_SIDE = 1024
+    if max(W, H) > MAX_SIDE:
+        scale = MAX_SIDE / max(W, H)
+        src = src.resize((int(W * scale), int(H * scale)), Image.LANCZOS)
+
+    buf = _io.BytesIO()
+    src.save(buf, format="JPEG", quality=80)
+    img_data   = base64.b64encode(buf.getvalue()).decode("utf-8")
+    media_type = "image/jpeg"
 
     payload = {
         "contents": [{
@@ -2851,21 +2861,24 @@ def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000},
     }
 
-    # retry + exponential backoff
-    wait_times = [5, 15, 30]   # รอ 5s → 15s → 30s
+    # retry + exponential backoff — รอจนสำเร็จ ไม่ raise error
+    wait_times = [10, 20, 30, 45, 60]
     for attempt, wait in enumerate(wait_times, 1):
         try:
+            # ลอง flash-lite ก่อน (เร็วกว่า, RPM สูงกว่า) → fallback flash
+            _url = _GEMINI_API_URL_LITE if attempt <= 3 else _GEMINI_API_URL
             resp = requests.post(
-                f"{_GEMINI_API_URL}?key={api_key}",
+                f"{_url}?key={api_key}",
                 json=payload, timeout=60,
             )
-            if resp.status_code == 429:
-                print(f"  ⏳ Rate limit (attempt {attempt}) → รอ {wait}s...")
-                time.sleep(wait)
-                continue
-            if resp.status_code == 503:
-                print(f"  🔄 Service unavailable (attempt {attempt}) → รอ {wait}s...")
-                time.sleep(wait)
+            if resp.status_code in (429, 503):
+                import streamlit as _st
+                for remaining in range(wait, 0, -1):
+                    try:
+                        _st.toast(f"⏳ Rate limit — รอ {remaining}s (ครั้งที่ {attempt}/{len(wait_times)})")
+                    except Exception:
+                        pass
+                    time.sleep(1)
                 continue
             resp.raise_for_status()
             data     = resp.json()
@@ -2881,7 +2894,20 @@ def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
         except json.JSONDecodeError as e:
             raise ValueError(f"JSON parse error: {e}\nRaw: {raw_text[:300]}")
 
-    raise RuntimeError("Gemini rate limit — ลองใหม่ใน 1 นาที")
+    # ถ้าหมด retry ทั้งหมด → ลองอีกครั้งสุดท้ายไม่จำกัดเวลา
+    for forever in range(999):
+        time.sleep(60)
+        try:
+            resp = requests.post(f"{_GEMINI_API_URL}?key={api_key}", json=payload, timeout=60)
+            if resp.status_code == 429:
+                continue
+            resp.raise_for_status()
+            data     = resp.json()
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
+            return json.loads(raw_text)
+        except Exception:
+            continue
 
     return result
 

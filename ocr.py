@@ -770,16 +770,10 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 BAO_CAFE_CATEGORY = "Bao Cafe"
 
-CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 8 หมวดนี้เท่านั้น):
-1. Bao Cafe — Bao ลาเต้, Bao อเมริกาโน่, Bao เอสเปรสโซ่, Bao โคโค่ ฯลฯ
-2. อาหารพร้อมทานและเบเกอรี่ — ข้าวกล่อง แซนด์วิช มาม่า ขนมปัง เค้ก ยูโรเค้ก
-3. ขนมและของขบเคี้ยว — ลูกอม ช็อกโกแลต มันฝรั่ง ถั่ว เยลลี่ สแน็ค
-4. เครื่องดื่ม — น้ำดื่ม น้ำอัดลม ชา กาแฟ นม ไมโล คาราบาว
-5. ของใช้ส่วนตัว — สบู่ แชมพู ยาสีฟัน โลชั่น ผ้าอนามัย
-6. ของใช้ในบ้าน — ผงซักฟอก น้ำยาล้างจาน กระดาษทิชชู ถุงขยะ
-7. เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ — ยา พลาสเตอร์ หน้ากาก วิตามิน
-8. สินค้าเบ็ดเตล็ดอื่นๆ — ถ่านไฟฉาย ปากกา บุหรี่ บัตรเติมเงิน
-หมวดพิเศษ: ส่วนลด/โปรโมชั่น — สำหรับส่วนลดและโปรโมชั่นเท่านั้น"""
+CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (3 หมวดเท่านั้น):
+1. Bao Cafe — เมนู Bao ลาเต้, Bao อเมริกาโน่, Bao โกโก้ ฯลฯ
+2. ส่วนลด/โปรโมชั่น — ส่วนลดและโปรโมชั่นเท่านั้น (ราคาติดลบ)
+3. สินค้าอื่นๆ — สินค้าทุกประเภทที่ไม่ใช่ Bao Cafe"""
 
 BAO_CAFE_MENU = """เมนู Bao Cafe: ลาเต้ | อเมริกาโน่ | เอสเปรสโซ่ | คาปูชิโน่ | โกโก้ | ชาเขียว | ชาไทย (ร้อน/เย็น)
 OCR มักอ่านผิด: "Bao_", "Beo", "B80", "Be0", "Ba0" → ล้วนหมายถึง "Bao"
@@ -807,30 +801,9 @@ def _is_bao_item(name: str) -> bool:
 def _categorize_by_rule(name: str) -> str:
     if _is_bao_item(name):
         return BAO_CAFE_CATEGORY
-    # ── FIX: โปรโมชั่นและส่วนลด ──
     if re.search(r'ส่วนลด|โปรโมชั่น|โปรโม|discount|promotion|แถม', name, re.IGNORECASE):
         return "ส่วนลด/โปรโมชั่น"
-    n = name.lower()
-    if re.search(r'มาม่า|ไวไว|ยำยำ|บะหมี่|ข้าว|แซนด์|ขนมปัง|เค้ก|ยูโร|ไส้กรอก|'
-                 r'หมูแผ่น|เนื้อแผ่น|สลัด|โจ๊ก|ซาลาเปา|euro|bakery|bread', n):
-        return "อาหารพร้อมทานและเบเกอรี่"
-    if re.search(r'เฮอร์ช|ช็อก|chocolate|โอโช|ข้าวอบ|มันฝรั่ง|ป๊อปคอร์|ถั่ว|เยลลี่|'
-                 r'ลูกอม|หมากฝรั่ง|สแน็ค|snack|คุกกี้|เวเฟอร์|เลย์|pringle|popcorn|candy', n):
-        return "ขนมและของขบเคี้ยว"
-    if re.search(r'น้ำ|นม|ชา|กาแฟ|coffee|tea|milk|โค้ก|coke|cola|เป๊ปซี่|pepsi|'
-                 r'สไปรท์|sprite|แฟนต้า|คาราบาว|กระทิง|ไมโล|milo|อราวน์|โออิชิ|'
-                 r'เกลือแร่|gatorade|เครื่องดื่ม|drink|juice|น้ำผล|น้ำส้ม', n):
-        return "เครื่องดื่ม"
-    if re.search(r'สบู่|แชมพู|shampoo|ยาสีฟัน|แปรงสีฟัน|ครีมอาบ|โลชั่น|lotion|'
-                 r'ผ้าอนามัย|ดีโอ|โรลออน|แป้ง|คอนแทค|ผ้าเช็ด|สกิน|skin|ครีม|serum', n):
-        return "ของใช้ส่วนตัว"
-    if re.search(r'ทิชชู|tissue|ผงซักฟอก|น้ำยาซัก|น้ำยาปรับ|น้ำยาล้าง|'
-                 r'ถุงขยะ|ถุงพลาสติก|ฟิล์มห่อ|cellox|comfort|downy|sunlight|vim|น้ำยา', n):
-        return "ของใช้ในบ้าน"
-    if re.search(r'ยา|พลาสเตอร์|แอลกอฮอล์|alcohol|หน้ากาก|mask|วิตามิน|vitamin|'
-                 r'อาหารเสริม|supplement|ถุงยาง|ผ้าพันแผล|paracetamol|ibuprofen', n):
-        return "เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ"
-    return "สินค้าเบ็ดเตล็ดอื่นๆ"
+    return "สินค้าอื่นๆ"
 
 def categorize_items_batch(items: list) -> list:
     if not items:
@@ -838,7 +811,7 @@ def categorize_items_batch(items: list) -> list:
     names = [it.get("ชื่อสินค้า", "") for it in items]
     pre_assigned = [_is_bao_item(n) for n in names]
     if not is_gemini_configured():
-        return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ" for bao in pre_assigned]
+        return [BAO_CAFE_CATEGORY if bao else "สินค้าอื่นๆ" for bao in pre_assigned]
     pending_indices = [i for i, bao in enumerate(pre_assigned) if not bao]
     pending_names   = [names[i] for i in pending_indices]
     result_cats     = [BAO_CAFE_CATEGORY if bao else "" for bao in pre_assigned]
@@ -859,7 +832,7 @@ def categorize_items_batch(items: list) -> list:
             return result_cats
     except Exception:
         pass
-    return [BAO_CAFE_CATEGORY if bao else "สินค้าเบ็ดเตล็ดอื่นๆ" for bao in pre_assigned]
+    return [BAO_CAFE_CATEGORY if bao else "สินค้าอื่นๆ" for bao in pre_assigned]
 
 # ── FIX: ลบ duplicate except block ──
 def extract_multi_bills_with_gemini(raw_text: str, n_bills: int) -> list:
@@ -1003,6 +976,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 กฎ:
 - Bao_, Beo, B80, Be0, Ba0, Bao. → "Bao" + หมวด "Bao Cafe"
 - โปรโมชั่น/ส่วนลด → ใส่เป็น item หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
+- สินค้าอื่นๆ ทุกชนิด → หมวด "สินค้าอื่นๆ"
 - "1 โปรโมชั่นM 1 แถม 1 Bao" + "-40.00" → item "โปรโมชั่น 1 แถม 1 Bao" ราคา -40.0
 - "1 โปรโมชั่นM ราคาพิเศษXXบ" + "-XX.00" → item "โปรโมชั่น ราคาพิเศษXXบ" หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
 - "3 โปรโมชั่น2ชิ้น35บ TAO KAE NOI" + "-15.00" → item "โปรโมชั่น 2ชิ้น35บ TAO KAE NOI" ราคา -15.0
@@ -1032,12 +1006,12 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
                 cat = BAO_CAFE_CATEGORY
             else:
                 cat = str(it.get("หมวดหมู่", ""))
-                if not cat or cat == "สินค้าเบ็ดเตล็ดอื่นๆ":
+                if not cat or cat == "สินค้าอื่นๆ":
                     rule_cat = _categorize_by_rule(name)
-                    if rule_cat != "สินค้าเบ็ดเตล็ดอื่นๆ":
+                    if rule_cat != "สินค้าอื่นๆ":
                         cat = rule_cat
                 if not cat:
-                    cat = "สินค้าเบ็ดเตล็ดอื่นๆ"
+                    cat = "สินค้าอื่นๆ"
             items.append({
                 "ชื่อสินค้า":    name,
                 "หมวดหมู่":     cat,
@@ -2085,7 +2059,7 @@ def build_excel(all_bills: list) -> bytes:
             for it in items:
                 name = it.get("ชื่อสินค้า", "")
                 cat  = BAO_CAFE_CATEGORY if _is_bao_item(name) \
-                       else (it.get("หมวดหมู่") or "สินค้าเบ็ดเตล็ดอื่นๆ")
+                       else (it.get("หมวดหมู่") or "สินค้าอื่นๆ")
                 unit_price = it.get("ราคาต่อหน่วย", 0)
                 total_amt  = it.get("ยอดรวมสินค้า", 0)
                 is_disc = (cat == "ส่วนลด/โปรโมชั่น"
@@ -2668,7 +2642,7 @@ def _render_bills_ui(all_bills, key_prefix=""):
                         if _is_bao_item(it.get("ชื่อสินค้า", "")):
                             items_display[i] = {**it, "หมวดหมู่": BAO_CAFE_CATEGORY}
                         elif not it.get("หมวดหมู่"):
-                            items_display[i] = {**it, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}
+                            items_display[i] = {**it, "หมวดหมู่": "สินค้าอื่นๆ"}
                     st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
                 else:
                     st.info(t("no_items"))
@@ -2955,7 +2929,7 @@ JSON format (ใช้ field ชื่อนี้เท่านั้น):
 5. ราคาหลัง QR ธนาคาร/เงินสด/เงินทอน = payment ไม่ใช่สินค้า
 6. ถ้ามี subtotal บวก + discount ลบติดกัน → ใช้ค่าลบเป็นส่วนลด
 
-หมวดหมู่: Bao Cafe | อาหารพร้อมทานและเบเกอรี่ | ขนมและของขบเคี้ยว | เครื่องดื่ม | ของใช้ส่วนตัว | ของใช้ในบ้าน | เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ | สินค้าเบ็ดเตล็ดอื่นๆ | ส่วนลด/โปรโมชั่น"""
+หมวดหมู่: Bao Cafe | สินค้าอื่นๆ | ส่วนลด/โปรโมชั่น"""
 
 # ─── Utility Functions ────────────────────────────────────────────────────────
 # get_api_key → replaced by _get_gemini_key()

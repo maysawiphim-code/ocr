@@ -2361,26 +2361,24 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     bill = {
                         "date":         gr.get("date", "ไม่พบ"),
                         "time":         gr.get("time", "ไม่พบ"),
-                        "branch":       gr.get("branch_name", "ไม่พบ"),
+                        "branch":       gr.get("branch", "ไม่พบ"),
                         "pos_id":       gr.get("pos_id", ""),
                         "pos_machine":  gr.get("pos_machine", ""),
-                        "rcpt_no":      gr.get("receipt_no", ""),
+                        "rcpt_no":      gr.get("rcpt_no", ""),
                         "total_amount": float(gr.get("total_amount", 0)),
                         "cash": 0.0, "change": 0.0,
-                        "name": gr.get("branch_name", ""),
+                        "name": gr.get("branch", ""),
                         "tax_id": "", "user": "",
                     }
                     raw_items = gr.get("items", [])
                     items = []
                     for it in raw_items:
-                        nm  = it.get("name", "")
-                        cat = it.get("category", "") or _categorize_by_rule(nm)
                         items.append({
-                            "ชื่อสินค้า":   nm,
-                            "หมวดหมู่":     cat,
-                            "จำนวน":       int(it.get("qty", 1)),
-                            "ราคาต่อหน่วย": float(it.get("unit_price", 0)),
-                            "ยอดรวมสินค้า": float(it.get("total_price", 0)),
+                            "ชื่อสินค้า":   it.get("ชื่อสินค้า", ""),
+                            "หมวดหมู่":     it.get("หมวดหมู่", "") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
+                            "จำนวน":       int(it.get("จำนวน", 1)),
+                            "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                            "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
                         })
                     results.append({"filename": label, "bill": bill, "items": items,
                                     "raw_text": "", "gdrive_raw": "",
@@ -2736,24 +2734,22 @@ def main():
                     bill = {
                         "date":         gemini_result.get("date", "ไม่พบ"),
                         "time":         gemini_result.get("time", "ไม่พบ"),
-                        "branch":       gemini_result.get("branch_name", "ไม่พบ"),
+                        "branch":       gemini_result.get("branch", "ไม่พบ"),
                         "pos_id":       gemini_result.get("pos_id", ""),
                         "pos_machine":  gemini_result.get("pos_machine", ""),
-                        "rcpt_no":      gemini_result.get("receipt_no", ""),
+                        "rcpt_no":      gemini_result.get("rcpt_no", ""),
                         "total_amount": float(gemini_result.get("total_amount", 0)),
                         "cash": 0.0, "change": 0.0,
                     }
                     raw_items = gemini_result.get("items", [])
                     items = []
                     for it in raw_items:
-                        nm  = it.get("name", "")
-                        cat = it.get("category", "") or _categorize_by_rule(nm)
                         items.append({
-                            "ชื่อสินค้า":   nm,
-                            "หมวดหมู่":     cat,
-                            "จำนวน":       int(it.get("qty", 1)),
-                            "ราคาต่อหน่วย": float(it.get("unit_price", 0)),
-                            "ยอดรวมสินค้า": float(it.get("total_price", 0)),
+                            "ชื่อสินค้า":   it.get("ชื่อสินค้า", ""),
+                            "หมวดหมู่":     it.get("หมวดหมู่", "") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
+                            "จำนวน":       int(it.get("จำนวน", 1)),
+                            "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                            "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
                         })
                     img_bytes = img_to_bytes_png(pil_to_cv(working_pil))
                     all_bills.append({"filename": fname, "bill": bill, "items": items,
@@ -2795,48 +2791,21 @@ MAX_RETRY      = 3     # retry สูงสุด
 RETRY_DELAY    = 5     # วินาที รอก่อน retry
 
 # ─── Prompt ───────────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """วิเคราะห์ใบเสร็จ CJ MORE จากภาพนี้ แล้วตอบ JSON เท่านั้น ห้ามมีข้อความอื่น
+SYSTEM_PROMPT = """คุณคือระบบอ่านใบเสร็จ CJ More (CJ Express) จากภาพ
+ตอบด้วย JSON เท่านั้น ห้ามมีข้อความอื่นนอกจาก JSON
 
-โครงสร้าง JSON ที่ต้องการ (ห้ามเพิ่ม/ลดฟิลด์):
-{
-  "date": "DD/MM/YYYY",
-  "time": "HH:MM",
-  "branch_name": "ชื่อสาขา เช่น มศว.องครักษ์",
-  "pos_id": "รหัสสาขา 4 หลัก จาก BNO เช่น 1653",
-  "pos_machine": "เครื่อง POS เช่น N02",
-  "receipt_no": "เลขที่ใบเสร็จท้าย BNO เช่น 003331",
-  "total_amount": 0.0,
-  "items": [
-    {
-      "name": "ชื่อสินค้า (แก้ OCR ให้ถูกต้อง)",
-      "category": "หมวดหมู่",
-      "qty": 1,
-      "unit_price": 0.0,
-      "total_price": 0.0
-    }
-  ]
-}
+JSON format (ใช้ field ชื่อนี้เท่านั้น):
+{"date":"DD/MM/YYYY","time":"HH:MM","branch":"ชื่อสาขา","pos_id":"4หลักจาก BNO","pos_machine":"NXX","rcpt_no":"เลขท้าย BNO","total_amount":0.0,"items":[{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}]}
 
-กฎสำคัญ:
-1. BNO: "BNO:S26061653N02-003331" → pos_id="1653", pos_machine="N02", receipt_no="003331"
-2. Bao Cafe: Bag/Bac/B4o/BAO/Beo/Ba0/8ao → "Bao" เสมอ หมวด "Bao Cafe"
-   "Bao_อเมริกาโน่เป็น" = "Bao อเมริกาโน่เย็น" (_ = space, เป็น = เย็น)
-3. โปรโมชั่น/ส่วนลด → name = "โปรโมชั่น XXX", category = "ส่วนลด/โปรโมชั่น", total_price = ลบ
-   ถ้ามี subtotal บวกก่อน discount ลบ → ใช้ค่าลบ (discount จริง) ไม่ใช่ค่าบวก
-4. OCR ผิดพลาดให้แก้: "เป็น" → "เย็น", "บอลรวม" = ยอดรวม (ข้าม), "สานานสินค้ารามรายการ" = จำนวนสินค้า (ข้าม)
-5. ราคาหลัง QR ธนาคาร/เงินสด/เงินทอน คือ payment ไม่ใช่สินค้า
-6. "หวานน้อย" "ไม่หวาน" "หวานปกติ" = note ของ Bao ไม่ใช่สินค้า
+กฎ (สำคัญมาก):
+1. BNO "BNO:S26061653N02-003331" → pos_id=1653, pos_machine=N02, rcpt_no=003331
+2. Bao Cafe: Bag/Bac/B4o/BAO/Beo/Ba0/8ao → "Bao ..." หมวด "Bao Cafe"
+3. ส่วนลด/โปรโมชั่น → หมวด "ส่วนลด/โปรโมชั่น", ยอดรวมสินค้า = ค่าลบ
+4. "หวานน้อย/ไม่หวาน/หวานปกติ" = note ของ Bao ไม่ใช่สินค้า
+5. ราคาหลัง QR ธนาคาร/เงินสด/เงินทอน = payment ไม่ใช่สินค้า
+6. ถ้ามี subtotal บวก + discount ลบติดกัน → ใช้ค่าลบเป็นส่วนลด
 
-หมวดหมู่ที่ใช้ได้:
-- Bao Cafe
-- อาหารพร้อมทานและเบเกอรี่
-- ขนมและของขบเคี้ยว
-- เครื่องดื่ม
-- ของใช้ส่วนตัว
-- ของใช้ในบ้าน
-- เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ
-- สินค้าเบ็ดเตล็ดอื่นๆ
-- ส่วนลด/โปรโมชั่น"""
+หมวดหมู่: Bao Cafe | อาหารพร้อมทานและเบเกอรี่ | ขนมและของขบเคี้ยว | เครื่องดื่ม | ของใช้ส่วนตัว | ของใช้ในบ้าน | เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ | สินค้าเบ็ดเตล็ดอื่นๆ | ส่วนลด/โปรโมชั่น"""
 
 # ─── Utility Functions ────────────────────────────────────────────────────────
 # get_api_key → replaced by _get_gemini_key()
@@ -2879,7 +2848,6 @@ def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
         "generationConfig": {
             "temperature": 0.1,
             "maxOutputTokens": 2000,
-            "responseMimeType": "application/json",   # บังคับ Gemini ตอบ JSON
         },
     }
 
@@ -2991,7 +2959,7 @@ def merge_results(json_dir: Path, output_file: Path):
             "เวลา":          data.get("time", ""),
             "รหัสสาขา":      data.get("pos_id", ""),
             "POS ID":        data.get("pos_machine", ""),
-            "เลขที่ใบเสร็จ": data.get("receipt_no", ""),
+            "เลขที่ใบเสร็จ": data.get("rcpt_no", ""),
             "ยอดรวม":        data.get("total_amount", 0),
         }
 
@@ -3004,11 +2972,11 @@ def merge_results(json_dir: Path, output_file: Path):
             })
         else:
             for it in items:
-                name      = it.get("name", "")
-                cat       = it.get("category", "")
-                qty       = it.get("qty", 1)
-                unit      = it.get("unit_price", 0.0)
-                total     = it.get("total_price", 0.0)
+                name      = it.get("ชื่อสินค้า", "")
+                cat       = it.get("หมวดหมู่", "")
+                qty       = it.get("จำนวน", 1)
+                unit      = it.get("ราคาต่อหน่วย", 0.0)
+                total     = it.get("ยอดรวมสินค้า", 0.0)
                 is_promo  = cat == "ส่วนลด/โปรโมชั่น" or total < 0
 
                 rows.append({

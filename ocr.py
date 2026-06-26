@@ -763,12 +763,14 @@ CJ_PRODUCT_KNOWLEDGE = """สินค้าในร้าน CJ Express:
 สินค้าเบ็ดเตล็ด: บุหรี่ ไฟแช็ก ปากกา สมุด บัตรเติมเงิน"""
 
 def _is_bao_item(name: str) -> bool:
+    """ตรวจว่าชื่อสินค้าเป็นเมนู Bao Cafe รวม OCR variants ทั้งหมด"""
     return bool(re.search(
-        r'\bb[a8e๐o0][o๐0][\W_]|'
-        r'\bb[a8e๐o0][o๐0]$|'
-        r'\bbo[\W_]|'
-        r'bao|'
-        r'เบา\s*คา|บาว\s*คา',
+        r'\b[Bb8][a8AeE๐4][oO0๐gGcCqQ][_\W]|'  # Bag_, Bac_, B4o_ ฯลฯ
+        r'\b[Bb8][a8AeE๐4][oO0๐gGcCqQ]$|'        # Bag, Bac, B4o ท้ายคำ
+        r'\b[Bb8][a8AeE๐4][oO0๐][\W_]|'          # Bao, BAO ตามด้วย _/space
+        r'\b[Bb8][a8AeE๐4][oO0๐]$|'               # Bao ท้ายคำ
+        r'\bbao\b|'                                # bao ตรงๆ
+        r'เบา\s*คา|บาว\s*คา',                     # บาว คาเฟ่
         name, re.IGNORECASE
     ))
 

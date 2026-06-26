@@ -2362,95 +2362,18 @@ document.getElementById('btn-reset').onclick=()=>{{
 # Batch mode
 # ─────────────────────────────────────────────────────────────────────────────
 def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = False,
-                        ocr_engine: str = "gemini", bills_per_image: int = 1) -> list:
-    """วิเคราะห์รูปใบเสร็จด้วย Gemini Vision โดยตรง — ไม่ผ่าน OCR กลาง"""
+                        ocr_engine: str = "tesseract", bills_per_image: int = 1) -> list:
+    """วิเคราะห์รูปใบเสร็จ รองรับทุก OCR engine"""
     results = []
-    api_key = _get_gemini_key()
     n = len(files)
 
-    # ── Parallel processing: ส่งพร้อมกัน n_keys รูป ──────────────────────────
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    keys     = _get_gemini_keys()
-    n_workers = max(1, min(len(keys), 4))   # parallel ไม่เกิน 4 หรือจำนวน key
-
-    def _process_one(args):
-        idx, fname, fbytes = args
-        try:
-            pil    = Image.open(io.BytesIO(fbytes)).convert("RGB")
-            img_cv = pil_to_cv(pil)
-            _gray_b = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-            _blur_b = cv2.Laplacian(_gray_b, cv2.CV_64F).var()
-            if _blur_b < 20:
-                return idx, {"filename": fname,
-                    "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
-                             "total_amount":0.0,"cash":0.0,"change":0.0,"pos_machine":"ไม่พบ",
-                             "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
-                    "items": [], "raw_text": f"[รูปไม่ชัด blur={_blur_b:.0f}]",
-                    "image": img_to_bytes_png(img_cv), "blurry": True}
-            sub_cvs = auto_crop_receipts(img_cv) if auto_detect_multi else [img_cv]
-            batch_results = []
-            for ci, crop_cv in enumerate(sub_cvs):
-                crop_pil = cv_to_pil(crop_cv)
-                label    = fname if len(sub_cvs) == 1 else f"{fname} — บิล {ci+1}"
-                try:
-                    gr = call_gemini_vision(None, _get_next_key(), pil_image=crop_pil)
-                    bill = {
-                        "date": gr.get("date","ไม่พบ"), "time": gr.get("time","ไม่พบ"),
-                        "branch": gr.get("branch","ไม่พบ"), "pos_id": gr.get("pos_id",""),
-                        "pos_machine": gr.get("pos_machine",""), "rcpt_no": gr.get("rcpt_no",""),
-                        "total_amount": float(gr.get("total_amount",0)),
-                        "cash":0.0,"change":0.0,"name":gr.get("branch",""),"tax_id":"","user":"",
-                    }
-                    items = [{"ชื่อสินค้า": it.get("ชื่อสินค้า",""),
-                              "หมวดหมู่": it.get("หมวดหมู่","") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
-                              "จำนวน": int(it.get("จำนวน",1)),
-                              "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย",0)),
-                              "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า",0))}
-                             for it in gr.get("items",[])]
-                    batch_results.append({"filename":label,"bill":bill,"items":items,
-                                          "raw_text":"","gdrive_raw":"",
-                                          "image":img_to_bytes_png(crop_cv)})
-                except Exception as _e:
-                    batch_results.append({"filename":label,
-                        "bill":{"date":"ไม่พบ","time":"ไม่พบ","branch":str(_e),"name":"ไม่พบ",
-                                "total_amount":0.0,"cash":0.0,"change":0.0,
-                                "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
-                        "items":[],"raw_text":f"[error:{_e}]","image":img_to_bytes_png(crop_cv)})
-            return idx, batch_results[0] if len(batch_results)==1 else batch_results
-        except Exception as e:
-            return idx, {"filename": fname,
-                "bill":{"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
-                        "total_amount":0.0,"cash":0.0,"change":0.0,
-                        "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
-                "items":[],"raw_text":f"[error:{e}]","image":b""}
-
-    results_map = {}
-    with ThreadPoolExecutor(max_workers=n_workers) as ex:
-        futs = {ex.submit(_process_one, (i, fname, fbytes)): i
-                for i, (fname, fbytes) in enumerate(files)}
-        done = 0
-        for fut in as_completed(futs):
-            done += 1
-            idx, res = fut.result()
-            results_map[idx] = res
-            fname_done = files[idx][0]
-            if progress_cb: progress_cb(done, n, fname_done)
-
-    # เรียงตามลำดับเดิม
-    for i in range(len(files)):
-        r = results_map.get(i)
-        if isinstance(r, list):
-            results.extend(r)
-        elif r:
-            results.append(r)
-    return results
-
-    # ── (legacy sequential fallback — ไม่ถูกเรียก) ──
     for i, (fname, fbytes) in enumerate(files, 1):
         if progress_cb: progress_cb(i, n, fname)
         try:
-            pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
+            pil    = Image.open(io.BytesIO(fbytes)).convert("RGB")
             img_cv = pil_to_cv(pil)
+
+            # ตรวจความชัด
             _gray_b = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
             _blur_b = cv2.Laplacian(_gray_b, cv2.CV_64F).var()
             if _blur_b < 20:
@@ -2462,58 +2385,49 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     "image": img_to_bytes_png(img_cv), "blurry": True})
                 continue
 
-            # แยก sub_crops ถ้า auto_detect
-            sub_crops_pil = [pil]
+            # แยก crops
             if auto_detect_multi:
-                sub_cvs = auto_crop_receipts(img_cv)
-                if len(sub_cvs) > 1:
-                    sub_crops_pil = [cv_to_pil(c) for c in sub_cvs]
+                sub_crops = auto_crop_receipts(img_cv)
+            elif ocr_engine == "gdrive" and bills_per_image > 1:
+                sub_crops = split_receipts_image(img_cv, n_expected=bills_per_image)
+                if len(sub_crops) < bills_per_image:
+                    sub_crops = sub_crops + [img_cv] * (bills_per_image - len(sub_crops))
+                sub_crops = sub_crops[:bills_per_image]
+            else:
+                sub_crops = [img_cv]
 
-            for ci, crop_pil in enumerate(sub_crops_pil):
-                label = fname if len(sub_crops_pil) == 1 else f"{fname} — บิล {ci+1}"
+            for ci, crop in enumerate(sub_crops):
+                label = fname if len(sub_crops) == 1 else f"{fname} — บิล {ci+1}"
                 try:
-                    # ── ส่งรูปให้ Gemini Vision โดยตรง ──
-                    gr = call_gemini_vision(None, api_key, pil_image=crop_pil)
-                    bill = {
-                        "date":         gr.get("date", "ไม่พบ"),
-                        "time":         gr.get("time", "ไม่พบ"),
-                        "branch":       gr.get("branch", "ไม่พบ"),
-                        "pos_id":       gr.get("pos_id", ""),
-                        "pos_machine":  gr.get("pos_machine", ""),
-                        "rcpt_no":      gr.get("rcpt_no", ""),
-                        "total_amount": float(gr.get("total_amount", 0)),
-                        "cash": 0.0, "change": 0.0,
-                        "name": gr.get("branch", ""),
-                        "tax_id": "", "user": "",
-                    }
-                    raw_items = gr.get("items", [])
-                    items = []
-                    for it in raw_items:
-                        items.append({
-                            "ชื่อสินค้า":   it.get("ชื่อสินค้า", ""),
-                            "หมวดหมู่":     it.get("หมวดหมู่", "") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
-                            "จำนวน":       int(it.get("จำนวน", 1)),
-                            "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
-                            "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
-                        })
+                    st.session_state["_gdrive_raw_texts"] = []
+                    text       = run_ocr(crop, engine=ocr_engine)
+                    gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                    text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
+                    if is_gemini_configured() and text_for_gemini.strip():
+                        gr    = extract_with_gemini(text_for_gemini,
+                                    ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract")
+                        bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
+                        items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
+                    else:
+                        bill  = extract_receipt(text)
+                        items = extract_items_cj(text)
                     results.append({"filename": label, "bill": bill, "items": items,
-                                    "raw_text": "", "gdrive_raw": "",
-                                    "image": img_to_bytes_png(pil_to_cv(crop_pil))})
+                                    "raw_text": text, "gdrive_raw": gdrive_raw,
+                                    "image": img_to_bytes_png(crop)})
                 except Exception as _e:
                     results.append({"filename": label,
                         "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":str(_e),"name":"ไม่พบ",
                                  "total_amount":0.0,"cash":0.0,"change":0.0,
                                  "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
-                        "items": [], "raw_text": f"[Gemini error: {_e}]",
-                        "image": img_to_bytes_png(img_cv)})
+                        "items": [], "raw_text": f"[error: {_e}]",
+                        "image": img_to_bytes_png(crop)})
 
         except Exception as e:
             results.append({"filename": fname,
-                            "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
-                                     "total_amount":0.0,"cash":0.0,"change":0.0,
-                                     "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
-                            "items": [], "raw_text": f"[error: {e}]",
-                            "image": b""})
+                "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
+                         "total_amount":0.0,"cash":0.0,"change":0.0,
+                         "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
+                "items": [], "raw_text": f"[ERROR] {e}", "image": None})
     return results
 
 

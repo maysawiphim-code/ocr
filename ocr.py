@@ -2755,9 +2755,13 @@ def main():
                     all_bills.append({"filename": fname, "bill": bill, "items": items,
                                       "raw_text": "", "gdrive_raw": "", "image": img_bytes})
                     progress.progress(1.0, text="✅ Gemini Vision เสร็จสิ้น")
+                except RuntimeError as _e:
+                    progress.progress(1.0, text="⏳ Rate limit")
+                    st.warning(f"⏳ {_e}\n\nกด **วิเคราะห์** อีกครั้งได้เลย")
+                    st.stop()
                 except Exception as _e:
-                    progress.progress(1.0, text=f"❌ Error")
-                    st.error(f"❌ Gemini Vision error: {_e}")
+                    progress.progress(1.0, text="❌ Error")
+                    st.error(f"❌ Gemini error: {_e}")
                     st.stop()
                 S.all_bills = all_bills; S.step=3; st.rerun()
 
@@ -2823,17 +2827,16 @@ def image_to_base64(path: Path) -> tuple[str, str]:
 
 
 def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
-    """ส่งรูปให้ Gemini Vision และ parse JSON กลับ
+    """ส่งรูปให้ Gemini Vision พร้อม retry + exponential backoff
     รับได้ทั้ง image_path (Path) หรือ pil_image (PIL.Image)
     """
     import requests
 
     if pil_image is not None:
-        # รับ PIL Image จาก Streamlit UI
         import io as _io
         buf = _io.BytesIO()
-        pil_image.save(buf, format="JPEG", quality=90)
-        img_data  = base64.b64encode(buf.getvalue()).decode("utf-8")
+        pil_image.save(buf, format="JPEG", quality=85)
+        img_data   = base64.b64encode(buf.getvalue()).decode("utf-8")
         media_type = "image/jpeg"
     else:
         img_data, media_type = image_to_base64(image_path)
@@ -2845,33 +2848,40 @@ def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
                 {"text": SYSTEM_PROMPT},
             ]
         }],
-        "generationConfig": {
-            "temperature": 0.1,
-            "maxOutputTokens": 2000,
-        },
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000},
     }
 
-    resp = requests.post(
-        f"{_GEMINI_API_URL}?key={api_key}",
-        json=payload,
-        timeout=60,
-    )
+    # retry + exponential backoff
+    wait_times = [5, 15, 30]   # รอ 5s → 15s → 30s
+    for attempt, wait in enumerate(wait_times, 1):
+        try:
+            resp = requests.post(
+                f"{_GEMINI_API_URL}?key={api_key}",
+                json=payload, timeout=60,
+            )
+            if resp.status_code == 429:
+                print(f"  ⏳ Rate limit (attempt {attempt}) → รอ {wait}s...")
+                time.sleep(wait)
+                continue
+            if resp.status_code == 503:
+                print(f"  🔄 Service unavailable (attempt {attempt}) → รอ {wait}s...")
+                time.sleep(wait)
+                continue
+            resp.raise_for_status()
+            data     = resp.json()
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
+            return json.loads(raw_text)
 
-    # Rate limit
-    if resp.status_code == 429:
-        raise RateLimitError("Rate limit hit")
+        except requests.exceptions.Timeout:
+            if attempt < len(wait_times):
+                time.sleep(wait)
+                continue
+            raise
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON parse error: {e}\nRaw: {raw_text[:300]}")
 
-    resp.raise_for_status()
-    data = resp.json()
-    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
-
-    # clean ถ้า Gemini ใส่ ```json
-    raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
-
-    try:
-        result = json.loads(raw_text)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"JSON parse error: {e}\nRaw: {raw_text[:300]}")
+    raise RuntimeError("Gemini rate limit — ลองใหม่ใน 1 นาที")
 
     return result
 

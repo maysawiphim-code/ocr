@@ -3268,8 +3268,6 @@ def _batch_main():
 
     args = parser.parse_args()
 
-    global SLEEP_BETWEEN
-    SLEEP_BETWEEN = args.sleep
 
     if not args.input and not args.merge:
         parser.print_help()

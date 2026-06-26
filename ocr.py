@@ -75,7 +75,7 @@ S = st.session_state
 TXT = {
     "th": dict(
         title="🧾 วิเคราะห์บิล CJ Express OCR Pro",
-        steps=["เลือกจำนวน","อัปโหลด","Crop","OCR"],
+        steps=["อัปโหลด","ปรับภาพ","OCR"],
         count_label="มีกี่บิลในภาพ?",
         b1="1 บิล", b1s="บิลเดียว",
         b2="2 บิล", b2s="เคียงกัน",
@@ -114,7 +114,7 @@ TXT = {
     ),
     "en": dict(
         title="🧾 CJ Express Receipt OCR Pro",
-        steps=["Count","Upload","Crop","OCR"],
+        steps=["Upload","Enhance","OCR"],
         count_label="How many bills in the image?",
         b1="1 bill", b1s="single",
         b2="2 bills", b2s="side by side",
@@ -924,6 +924,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - pos_id จาก BNO: "BNO.S26061416N04-004135" → pos_id = "1416", pos_machine = "N04"
 - User line: "Useranutsata pon POS N04" → pos_machine = "N04"
 - โปรโมชั่น "1 โปรโมชั่นM 1 แถม 1 Bao" + "-40.00" → item "โปรโมชั่น 1 แถม 1 Bao" ราคา -40.0
+- "1 โปรโมชั่นราคาพิเศษ20บ\n87.00\n-7.00" → ราคาบวก (87.00) = ยอดก่อนหัก ให้ใช้ราคาลบ (-7.00) เป็นส่วนลด
+- pattern โปรโมชั่น: ถ้ามีทั้งราคาบวกและลบต่อเนื่อง → ราคาลบคือส่วนลดจริง ราคาบวกคือยอดรวมสินค้า (ข้ามไป)
 - "จานวนสินค้ารวมNรายการ" หรือ "จํานวนสินค้ารวมNรายการ" → ข้ามไป ไม่ใช่สินค้า
 - ถ้า raw text มี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการ (ไม่นับส่วนลด)
 - pos_id: จาก BNO เช่น BNO:S26061745N04 → "1745", BNO:S26061371N02 → "1371"
@@ -2687,7 +2689,7 @@ def main():
                         label  = f"{'✅ ' if is_sel else ''}{fname[:14]}{'…' if len(fname)>14 else ''}"
                         if st.button(label, key=f"gal_{idx}", use_container_width=True,
                                      type="primary" if is_sel else "secondary"):
-                            S.selected_idx=idx; S.crop_result=None; S.step=3
+                            S.selected_idx=idx; S.crop_result=None; S.step=2
                             S.manual_splits_px=None; S.crop_applied=False
                             st.rerun()
                     except Exception:
@@ -2704,109 +2706,56 @@ def main():
 
     if active_bytes:
         st.divider()
-        st.markdown(f'<p class="sec-header">{t("crop_label")}</p>', unsafe_allow_html=True)
         try:
             pil_orig = Image.open(io.BytesIO(active_bytes)).convert("RGB")
         except Exception as e:
             st.error(f"ไม่สามารถโหลดรูป: {e}"); return
 
-        crop_col, ctrl_col = st.columns([3,1])
-        with ctrl_col:
-            mode_choice = st.radio("โหมด Crop", [t("crop_free"), t("crop_a4")], key="crop_mode_r")
-            mode_key = "a4" if t("crop_a4") in mode_choice else "free"
-            st.info(t("crop_hint"))
-        with crop_col:
-            st_html(crop_component_html(pil_orig, mode_key, bill_count=1),
-                height=320, scrolling=False)  # 1 บิลต่อรูป
+        # ── ปรับภาพ ──────────────────────────────────────────────────────
+        img_cv_raw = pil_to_cv(pil_orig)
+        gray_raw   = cv2.cvtColor(img_cv_raw, cv2.COLOR_BGR2GRAY)
 
-        st.markdown("**📋 วางข้อมูล Crop ที่คัดลอกจากด้านบน:**")
-        paste_col, btn_col = st.columns([4,1])
-        crop_json_str = paste_col.text_input(
-            "JSON ข้อมูล Crop", value="", key="crop_json_input",
-            label_visibility="collapsed",
-            placeholder='วาง {"x":0,"y":0,"w":800,"h":600,"splits":[300,560]} ที่นี่')
+        enh_col, prev_col = st.columns([2, 1])
+        with enh_col:
+            st.markdown("**🖼️ ปรับภาพก่อน OCR**")
+            sharp_val    = st.slider("ความคมชัด (Sharpen)", 0.0, 3.0, 1.0, 0.1, key="enh_sharp")
+            contrast_val = st.slider("คอนทราสต์",           0.5, 3.0, 1.0, 0.1, key="enh_cont")
+            bw_mode      = st.checkbox("ขาวดำ (Grayscale → ช่วย OCR)", value=True, key="enh_bw")
 
-        w0, h0 = pil_orig.size
-        cx, cy, cw, ch, parsed_splits = 0, 0, w0, h0, []
-        if crop_json_str.strip():
-            try:
-                data = json.loads(crop_json_str.strip())
-                cx = int(data.get("x", 0)); cy = int(data.get("y", 0))
-                cw = int(data.get("w", w0)); ch = int(data.get("h", h0))
-                parsed_splits = [int(p) for p in data.get("splits", [])]
-            except Exception:
-                st.warning("⚠️ รูปแบบข้อมูลไม่ถูกต้อง")
+        # สร้างรูปที่ผ่านการปรับแล้ว
+        from PIL import ImageEnhance, ImageFilter
+        pil_enh = pil_orig.copy()
+        if contrast_val != 1.0:
+            pil_enh = ImageEnhance.Contrast(pil_enh).enhance(contrast_val)
+        if sharp_val != 1.0:
+            pil_enh = ImageEnhance.Sharpness(pil_enh).enhance(sharp_val)
+        if bw_mode:
+            pil_enh = pil_enh.convert("L").convert("RGB")
 
-        st.caption("หรือระบุพื้นที่ Crop ด้วยตัวเลขเอง:")
-        mc = st.columns(4)
-        cx = mc[0].number_input("X (px)", 0, w0, cx, key="cx")
-        cy = mc[1].number_input("Y (px)", 0, h0, cy, key="cy")
-        cw = mc[2].number_input("W (px)", 1, w0, cw if cw>0 else w0, key="cw")
-        ch = mc[3].number_input("H (px)", 1, h0, ch if ch>0 else h0, key="ch")
+        with prev_col:
+            st.markdown("**ตัวอย่าง**")
+            st.image(pil_enh, use_container_width=True)
 
-        splits_str = ""  # 1 บิลต่อรูป — ไม่มี multi-bill splits
-
-        bc1, bc2 = st.columns(2)
-        with bc1:
-            if st.button(t("crop_confirm"), use_container_width=True, type="primary"):
-                S.crop_result = pil_orig.crop((cx, cy, min(cx+cw,w0), min(cy+ch,h0)))
-                S.crop_applied = True
-                manual_splits = []
-                if splits_str.strip():
-                    try:
-                        manual_splits = [int(x.strip()) - cx for x in splits_str.split(",") if x.strip()]
-                        manual_splits = [p for p in manual_splits if 0 < p < cw]
-                    except Exception:
-                        manual_splits = []
-                elif parsed_splits:
-                    manual_splits = [p - cx for p in parsed_splits if 0 < (p - cx) < cw]
-                S.manual_splits_px = manual_splits if manual_splits else None
-                S.step=4; st.rerun()
-        with bc2:
-            if st.button(t("crop_skip"), use_container_width=True):
-                S.crop_result = pil_orig
-                S.crop_applied = False
-                S.manual_splits_px = None
-                S.step=4; st.rerun()
+        S.crop_result = pil_enh
+        S.crop_applied = True
 
     working_pil = S.crop_result
-    if working_pil is None and active_bytes and S.step == 4:
+    if working_pil is None and active_bytes:
         working_pil = Image.open(io.BytesIO(active_bytes)).convert("RGB")
 
     if working_pil:
         st.divider()
         img_cv_preview = pil_to_cv(working_pil)
 
-        # ── ตรวจสอบความชัดของรูป ──
-        def _check_blur(img_cv):
-            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-            lap = cv2.Laplacian(gray, cv2.CV_64F).var()
-            return lap
-
-        blur_score = _check_blur(img_cv_preview)
-        IS_BLURRY = blur_score < 30  # threshold
-
-        # ── Preview รูป (เล็กลง) + crop previews ──
-        fname_active = (S.gallery_files[S.selected_idx][0]
-                        if 0 <= S.selected_idx < len(S.gallery_files) else "image")
-
-        if False:  # ✂️ ตัด multi-bill preview ออก
-            pass
-        else:
-            # 1 บิล: preview เล็กๆ
-            col_img, col_info = st.columns([1, 3])
-            with col_img:
-                st.image(working_pil, width=160, caption=fname_active[:20])
-            with col_info:
-                engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
-                                "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
-                st.caption(f"Engine: **{engine_label}**")
-                if IS_BLURRY:
-                    st.error(f"⚠️ **รูปไม่ชัด** (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
+        # blur check
+        gray_chk = cv2.cvtColor(img_cv_preview, cv2.COLOR_BGR2GRAY)
+        blur_score = cv2.Laplacian(gray_chk, cv2.CV_64F).var()
+        if blur_score < 30:
+            st.warning(f"⚠️ รูปไม่ชัด (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
 
         engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
                         "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
-        st.caption(f"Engine: **{engine_label}** | blur score: {blur_score:.0f}")
+        st.caption(f"Engine: **{engine_label}**")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
                 with st.spinner("กำลัง OCR..."):
@@ -2847,7 +2796,7 @@ def main():
                                           "image":img_to_bytes_png(crop)})
                     progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
 
-                    S.all_bills = all_bills; S.step=4; st.rerun()
+                    S.all_bills = all_bills; S.step=3; st.rerun()
 
     if S.all_bills:
         _render_bills_ui(S.all_bills, key_prefix="s")

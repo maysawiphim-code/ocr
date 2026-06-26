@@ -1,3 +1,4 @@
+import sys
 import streamlit as st
 from streamlit.components.v1 import html as st_html
 from PIL import Image
@@ -10,6 +11,12 @@ import numpy as np
 import os
 import base64
 import json
+
+# ── Batch OCR imports ─────────────────────────────────────────────────────────
+import time
+import argparse
+from pathlib import Path
+from datetime import datetime
 
 # ── Google Drive / Docs API ───────────────────────────────────────────────────
 try:
@@ -702,13 +709,36 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini API
 # ─────────────────────────────────────────────────────────────────────────────
-_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+_GEMINI_API_URL      = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+_GEMINI_API_URL_LITE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent"
+
+# ── Gemini Key Pool (round-robin เพื่อเพิ่ม RPM) ──────────────────────────────
+_gemini_key_index = 0
+
+def _get_gemini_keys() -> list:
+    """อ่าน API keys ทั้งหมด รองรับหลาย key คั่นด้วย , หรือ newline"""
+    try:
+        raw = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+    except Exception:
+        raw = os.environ.get("GEMINI_API_KEY", "")
+    # แยก keys (คั่นด้วย , หรือ newline)
+    keys = [k.strip() for k in re.split(r"[,\n]+", raw) if k.strip()]
+    return keys
 
 def _get_gemini_key() -> str:
-    try:
-        return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
-    except Exception:
-        return os.environ.get("GEMINI_API_KEY", "")
+    """คืน key แรกที่มี"""
+    keys = _get_gemini_keys()
+    return keys[0] if keys else ""
+
+def _get_next_key() -> str:
+    """Round-robin เลือก key ถัดไป"""
+    global _gemini_key_index
+    keys = _get_gemini_keys()
+    if not keys:
+        return ""
+    key = keys[_gemini_key_index % len(keys)]
+    _gemini_key_index += 1
+    return key
 
 def is_gemini_configured() -> bool:
     return bool(_get_gemini_key().strip())
@@ -1115,13 +1145,13 @@ def _clean_bno(raw: str) -> str:
 def _find_rcpt_no(text: str, compact: str) -> str:
     for line in text.split('\n'):
         c = _collapse(line)
-        m = re.search(r"(?:BNO|8NO|BN0)[:'\u2018\u2019`\-\.\s]*(.+)$", c, re.IGNORECASE)
+        m = re.search(r"(?:BNO|BNQ|8NO|BN0)[:'\u2018\u2019`\-\.\s]*(.+)$", c, re.IGNORECASE)
         if m:
             raw_tail = m.group(1).strip()
             if raw_tail:
                 cleaned = _clean_bno(raw_tail)
                 return cleaned if cleaned else raw_tail
-    m = re.search(r'([A-Z]\d{7,}[A-Z]\d{2}-\d{4,})', compact)
+    m = re.search(r'(?:BNQ:)?([A-Z]\d{7,}[A-Z]\d{2}-\d{4,})', compact)
     if m: return m.group(1)
     for src in [text, compact]:
         m = re.search(r'(?:1D|ID|lD)\s*[:\s€£$]\s*([A-Za-z][A-Za-z0-9]{5,24})', src, re.IGNORECASE)
@@ -1146,13 +1176,13 @@ def _find_rcpt_no(text: str, compact: str) -> str:
 def _find_pos_machine_id(text: str, compact: str) -> str:
     for line in text.split('\n'):
         c = _collapse(line)
-        m = re.search(r'(?:BNO|8NO|BN0)[:\s.]*[A-Z]\d{8}([A-Z]\d{2,3})-', c, re.IGNORECASE)
+        m = re.search(r'(?:BNO|BNQ|8NO|BN0)[:\s.]*[A-Z]\d{8}([A-Z]\d{2,3})-', c, re.IGNORECASE)
         if m: return m.group(1)
     # จาก User line: "Userxxxxx POS :N04" หรือ "POS N04"
     for line in text.split('\n'):
-        m = re.search(r'POS\s*[:\s]*([A-Z]\d{2,3})(?:\s|$)', line, re.IGNORECASE)
+        m = re.search(r'POS\s*(?:[:\s]|NO\s*)([A-Z]?\d{2,3})(?:\s|$)', line, re.IGNORECASE)
         if m: return m.group(1)
-    m = re.search(r'POS\s*[:\s]+([A-Z]\d{2,3})', compact, re.IGNORECASE)
+    m = re.search(r'POS\s*(?:[:\s]|NO\s*)([A-Z]?\d{2,3})', compact, re.IGNORECASE)
     if m: return m.group(1)
     return "ไม่พบ"
 
@@ -1160,7 +1190,7 @@ def _find_pos_id(text: str, compact: str, lines: list) -> str:
     # 1. BNO — รองรับ BNO: และ BNO.
     for line in text.split('\n'):
         c = _collapse(line)
-        m = re.search(r'(?:BNO|8NO|BN0)[:\s.]*[A-Z]\d{4}(\d{4})[A-Z]\d+', c, re.IGNORECASE)
+        m = re.search(r'(?:BNO|BNQ|8NO|BN0)[:\s.]*[A-Z]\d{4}(\d{4})[A-Z]\d+', c, re.IGNORECASE)
         if m: return m.group(1)
     # 2. keyword สาขา — skip TAXID
     _BRANCH_KW = r'(?:สาขา|ลาขา|ฉาขา|ฬาขา|ขัสาชา|สาชาต|ชาขาต)'
@@ -1392,7 +1422,7 @@ def universal_item_parser(text: str) -> list:
     _SKIP_UP  = re.compile(
         r'(?:^|\s)(?:ยอดรวม|บอลรวม|บอดราม|รวมสุทธิ|รวมทั้งสิ้น|UORTIN|UORT)(?:\s|$)'
         r'|(?:^|\s)(?:เงินสด|เงินทอน|เงินเด|ในสต|เงินบน)(?:\s|$)'
-        r'|^BNO|^8NO|^BN0|^TAX|^MORE|^TAXID|^INCLUDED|^MAT\s*INCLUDED|^ID:|^User|^ne-User'
+        r'|^BNO|^BNQ|^8NO|^BN0|^TAX|^MORE|^TAXID|^INCLUDED|^MAT\s*INCLUDED|^ID:|^User|^ne-User'
         r'|^POS\s*:|^PCS\s*:'
         r'|(?:QR|OR|0R|QRE|ORE)\s*(?:ธนาคาร|[อา][ลา]?คาร|นาค[\w]*)|Grab\s*Mart|^Order\s*no|^ธนาคาร'
         r'|^สมาชิก|^รหัสสมาชิก|^แต้ม|^เติม|^ขอบคุณ|^ร้องเรียน|^RECEIPT|^INVOICE'
@@ -1478,7 +1508,9 @@ def universal_item_parser(text: str) -> list:
             re.search(r'(?:ne-)?User\w+.*(?:POS|PCS)|BNO[:\s.]',s,re.IGNORECASE) or  # User+BNO ปนกลาง
             re.match(r'^(?:QR|OR|0R|Grab)\s*$',s,re.IGNORECASE) or   # payment keyword เดี่ยว
             re.match(r'^\d+[.,]\d{2}\s*บาท\s*$',s) or              # "40.00 บาท" → ยอดชำระ
-            re.match(r'^\d{5,}$',lc)
+            re.match(r'^\d{5,}$',lc) or
+            re.match(r'^\d{1,2}$', s.strip()) or  # เลขลอย เช่น '1' หลัง subtotal
+            re.match(r'^\d{1,2}$',lc)  # ตัวเลขเดี่ยว เช่น '1' หลัง ยอดรวม
         )
 
     # normalize
@@ -1488,6 +1520,22 @@ def universal_item_parser(text: str) -> list:
         l = re.sub(r'\bBag(?=[_\s])','Bao',l,flags=re.IGNORECASE)  # Bag → Bao
         l = re.sub(r'\bBAO(?=[_\s])','Bao',l)  # BAO → Bao
         l = re.sub(r'\bจานวนสินค[้า]?รวม','จำนวนสินค้ารวม',l)
+        # ── แยก "N. ชื่อ1 1 ชื่อ2 ราคา [kcount]" → 2 บรรทัด ──
+        lc = re.sub(r'\s*[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$','',l,flags=re.IGNORECASE).strip()
+        # "N. ชื่อ1 1 ชื่อ2 ราคา" → 2 items
+        m_pair = re.match(r'^(\d+)\.\s*(.+?)\s+1\s+(.+?)\s+(\d+[.,]\d{2})\)?$', lc)
+        # "N ชื่อ1 N ชื่อ2" (ไม่มีราคา) → 2 items ราคาหลัง
+        m_pair2 = re.match(r'^1\s+([ก-๙A-Za-z][^\d]+?)\s+1\s+([ก-๙A-Za-z].+?)\s*$', lc)
+        if m_pair:
+            _, nm1, nm2, pr2 = m_pair.groups()
+            lines.append(f"1 {nm1}")
+            lines.append(f"1 {nm2} {pr2} {pr2} V")
+            continue
+        elif m_pair2:
+            nm1, nm2 = m_pair2.groups()
+            lines.append(f"1 {nm1.strip()}")
+            lines.append(f"1 {nm2.strip()}")
+            continue
         l = re.sub(r'\s*[สจ].{0,6}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$','',l,flags=re.IGNORECASE).strip()
         l = _norm_digits(l)
         lines.append(l)
@@ -1560,27 +1608,52 @@ def universal_item_parser(text: str) -> list:
             nc = _clean(line)
             if _nq(nc) < 2 or re.match(r'^\d+\.?\d*$',nc): i+=1; continue
             pf = []
+            pf_has_v = []   # บันทึกว่าแต่ละ price มี V หรือเปล่า
             j  = i+1
+            # ตรวจว่า item ถัดไปรออยู่ (consecutive items)
+            next_item_waiting = (
+                i+1 < len(lines) and
+                i+1 not in used and
+                bool(re.match(r'^[1-9]\d{0,1}\s+[ก-๙A-Za-z]', lines[i+1].strip()))
+            )
             while j < min(i+15, len(lines)) and len(pf) < 2:
                 if j in used: j+=1; continue
                 nxt = lines[j].strip()
                 if not nxt: j+=1; continue
                 if _NOTE.match(nxt): j+=1; continue
+                # หยุด look-ahead ถ้าเจอ item ถัดไป (qty + Thai)
+                if re.match(r'^\d+\s+[ก-๙A-Za-z]', nxt) and _find_prices(nxt):
+                    break
                 m_n2 = _RE_NEG.match(nxt)
                 if m_n2:
                     if is_p:
-                        pf.append('-'+m_n2.group(1)); used.add(j)
+                        pf.append('-'+m_n2.group(1)); pf_has_v.append(True); used.add(j)
                     break
                 ps = _find_prices(nxt)
+                has_v_line = bool(re.search(r'[Vv]\s*$', nxt))
                 if ps and not _is_skip(nxt):
-                    pf.extend(ps[:2-len(pf)]); used.add(j)
+                    if len(ps) >= 2 and next_item_waiting:
+                        pf.append(ps[0]); pf_has_v.append(has_v_line); used.add(j)
+                    else:
+                        for p_val in ps[:2-len(pf)]:
+                            pf.append(p_val); pf_has_v.append(has_v_line)
+                        used.add(j)
                 elif _is_skip(nxt):
-                    pass  # ข้าม skip แต่ look-ahead ต่อ
+                    pass
                 j+=1
             if pf:
                 pv=[_pp(p.lstrip('-'))*(-1 if str(p).startswith('-') else 1) for p in map(str,pf)]
                 unit=pv[0]; total=pv[-1]
                 if total>0 and total<unit*0.3: total=unit*qty
+                # subtotal guard: ถ้า price บรรทัดสุดท้ายไม่มี V แต่ price แรกมี V → total = unit
+                last_has_v  = pf_has_v[-1] if pf_has_v else True
+                first_has_v = pf_has_v[0]  if pf_has_v else True
+                if len(pf)>=2 and not last_has_v and first_has_v:
+                    total = unit * qty  # V-line คือ total จริง, no-V คือ subtotal
+                elif total>0 and unit>0 and total>unit*qty*2.0 and not last_has_v:
+                    total = unit * qty
+                elif total>0 and unit>0 and total>unit*qty*1.8 and next_item_waiting and not last_has_v:
+                    total = unit * qty
                 if is_p and total > 0: unit=-abs(unit); total=-abs(total)
                 elif is_p and total == 0:
                     m_pamt=re.search(r'(?:ราคาพิเศษ|ลด)\s*(\d+)',nc,re.IGNORECASE)
@@ -2315,19 +2388,98 @@ document.getElementById('btn-reset').onclick=()=>{{
 # Batch mode
 # ─────────────────────────────────────────────────────────────────────────────
 def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = False,
-                        ocr_engine: str = "tesseract", bills_per_image: int = 1) -> list:
+                        ocr_engine: str = "gemini", bills_per_image: int = 1) -> list:
+    """วิเคราะห์รูปใบเสร็จด้วย Gemini Vision โดยตรง — ไม่ผ่าน OCR กลาง"""
     results = []
+    api_key = _get_gemini_key()
     n = len(files)
+
+    # ── Parallel processing: ส่งพร้อมกัน n_keys รูป ──────────────────────────
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    keys     = _get_gemini_keys()
+    n_workers = max(1, min(len(keys), 4))   # parallel ไม่เกิน 4 หรือจำนวน key
+
+    def _process_one(args):
+        idx, fname, fbytes = args
+        try:
+            pil    = Image.open(io.BytesIO(fbytes)).convert("RGB")
+            img_cv = pil_to_cv(pil)
+            _gray_b = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
+            _blur_b = cv2.Laplacian(_gray_b, cv2.CV_64F).var()
+            if _blur_b < 20:
+                return idx, {"filename": fname,
+                    "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
+                             "total_amount":0.0,"cash":0.0,"change":0.0,"pos_machine":"ไม่พบ",
+                             "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
+                    "items": [], "raw_text": f"[รูปไม่ชัด blur={_blur_b:.0f}]",
+                    "image": img_to_bytes_png(img_cv), "blurry": True}
+            sub_cvs = auto_crop_receipts(img_cv) if auto_detect_multi else [img_cv]
+            batch_results = []
+            for ci, crop_cv in enumerate(sub_cvs):
+                crop_pil = cv_to_pil(crop_cv)
+                label    = fname if len(sub_cvs) == 1 else f"{fname} — บิล {ci+1}"
+                try:
+                    gr = call_gemini_vision(None, _get_next_key(), pil_image=crop_pil)
+                    bill = {
+                        "date": gr.get("date","ไม่พบ"), "time": gr.get("time","ไม่พบ"),
+                        "branch": gr.get("branch","ไม่พบ"), "pos_id": gr.get("pos_id",""),
+                        "pos_machine": gr.get("pos_machine",""), "rcpt_no": gr.get("rcpt_no",""),
+                        "total_amount": float(gr.get("total_amount",0)),
+                        "cash":0.0,"change":0.0,"name":gr.get("branch",""),"tax_id":"","user":"",
+                    }
+                    items = [{"ชื่อสินค้า": it.get("ชื่อสินค้า",""),
+                              "หมวดหมู่": it.get("หมวดหมู่","") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
+                              "จำนวน": int(it.get("จำนวน",1)),
+                              "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย",0)),
+                              "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า",0))}
+                             for it in gr.get("items",[])]
+                    batch_results.append({"filename":label,"bill":bill,"items":items,
+                                          "raw_text":"","gdrive_raw":"",
+                                          "image":img_to_bytes_png(crop_cv)})
+                except Exception as _e:
+                    batch_results.append({"filename":label,
+                        "bill":{"date":"ไม่พบ","time":"ไม่พบ","branch":str(_e),"name":"ไม่พบ",
+                                "total_amount":0.0,"cash":0.0,"change":0.0,
+                                "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
+                        "items":[],"raw_text":f"[error:{_e}]","image":img_to_bytes_png(crop_cv)})
+            return idx, batch_results[0] if len(batch_results)==1 else batch_results
+        except Exception as e:
+            return idx, {"filename": fname,
+                "bill":{"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
+                        "total_amount":0.0,"cash":0.0,"change":0.0,
+                        "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
+                "items":[],"raw_text":f"[error:{e}]","image":b""}
+
+    results_map = {}
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        futs = {ex.submit(_process_one, (i, fname, fbytes)): i
+                for i, (fname, fbytes) in enumerate(files)}
+        done = 0
+        for fut in as_completed(futs):
+            done += 1
+            idx, res = fut.result()
+            results_map[idx] = res
+            fname_done = files[idx][0]
+            if progress_cb: progress_cb(done, n, fname_done)
+
+    # เรียงตามลำดับเดิม
+    for i in range(len(files)):
+        r = results_map.get(i)
+        if isinstance(r, list):
+            results.extend(r)
+        elif r:
+            results.append(r)
+    return results
+
+    # ── (legacy sequential fallback — ไม่ถูกเรียก) ──
     for i, (fname, fbytes) in enumerate(files, 1):
         if progress_cb: progress_cb(i, n, fname)
         try:
             pil = Image.open(io.BytesIO(fbytes)).convert("RGB")
             img_cv = pil_to_cv(pil)
-
-            # ── ตรวจสอบความชัด ──
             _gray_b = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
             _blur_b = cv2.Laplacian(_gray_b, cv2.CV_64F).var()
-            if _blur_b < 20:  # ไม่ชัดมาก → skip OCR
+            if _blur_b < 20:
                 results.append({"filename": fname,
                     "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
                              "total_amount":0.0,"cash":0.0,"change":0.0,"pos_machine":"ไม่พบ",
@@ -2336,75 +2488,60 @@ def run_batch_analysis(files: list, progress_cb=None, auto_detect_multi: bool = 
                     "image": img_to_bytes_png(img_cv), "blurry": True})
                 continue
 
-            if ocr_engine == "gdrive" and bills_per_image > 1:
-                thumb_crops = split_receipts_image(img_cv, n_expected=bills_per_image)
-                if len(thumb_crops) < bills_per_image:
-                    thumb_crops = thumb_crops + [img_cv] * (bills_per_image - len(thumb_crops))
-                thumb_crops = thumb_crops[:bills_per_image]
-                for ci, crop in enumerate(thumb_crops):
-                    label = f"{fname} — บิล {ci+1}"
-                    st.session_state["_gdrive_raw_texts"] = []
-                    text       = run_ocr(crop, engine="gdrive")
-                    gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                    text_for_gemini = gdrive_raw if gdrive_raw else text
-                    if is_gemini_configured() and text_for_gemini.strip():
-                        gr    = extract_with_gemini(text_for_gemini, ocr_source="gdrive")
-                        bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
-                        items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
-                    else:
-                        bill  = extract_receipt(text)
-                        items = extract_items_cj(text)
-                    results.append({"filename": label, "bill": bill, "items": items,
-                                    "raw_text": text, "gdrive_raw": gdrive_raw,
-                                    "image": img_to_bytes_png(crop)})
-                continue
-
+            # แยก sub_crops ถ้า auto_detect
+            sub_crops_pil = [pil]
             if auto_detect_multi:
-                sub_crops = auto_crop_receipts(img_cv)
-            else:
-                sub_crops = [img_cv]
+                sub_cvs = auto_crop_receipts(img_cv)
+                if len(sub_cvs) > 1:
+                    sub_crops_pil = [cv_to_pil(c) for c in sub_cvs]
 
-            if len(sub_crops) == 1:
-                st.session_state["_gdrive_raw_texts"] = []
-                text       = run_ocr(sub_crops[0], engine=ocr_engine)
-                gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
-                if is_gemini_configured() and text_for_gemini.strip():
-                    gr    = extract_with_gemini(text_for_gemini,
-                                                ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract")
-                    bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
-                    items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
-                else:
-                    bill  = extract_receipt(text)
-                    items = extract_items_cj(text)
-                results.append({"filename": fname, "bill": bill, "items": items,
-                                "raw_text": text, "gdrive_raw": gdrive_raw,
-                                "image": img_to_bytes_png(sub_crops[0])})
-            else:
-                for ci, crop in enumerate(sub_crops, 1):
-                    label = f"{fname} — บิล {ci}"
-                    st.session_state["_gdrive_raw_texts"] = []
-                    text       = run_ocr(crop, engine=ocr_engine)
-                    gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                    text_for_gemini = gdrive_raw if (ocr_engine == "gdrive" and gdrive_raw) else text
-                    if is_gemini_configured() and text_for_gemini.strip():
-                        gr    = extract_with_gemini(text_for_gemini,
-                                                    ocr_source="gdrive" if ocr_engine == "gdrive" else "tesseract")
-                        bill  = gr["bill"] if gr["ok"] else extract_receipt(text)
-                        items = gr["items"] if gr["ok"] and gr["items"] else extract_items_cj(text)
-                    else:
-                        bill  = extract_receipt(text)
-                        items = extract_items_cj(text)
+            for ci, crop_pil in enumerate(sub_crops_pil):
+                label = fname if len(sub_crops_pil) == 1 else f"{fname} — บิล {ci+1}"
+                try:
+                    # ── ส่งรูปให้ Gemini Vision โดยตรง ──
+                    gr = call_gemini_vision(None, api_key, pil_image=crop_pil)
+                    bill = {
+                        "date":         gr.get("date", "ไม่พบ"),
+                        "time":         gr.get("time", "ไม่พบ"),
+                        "branch":       gr.get("branch", "ไม่พบ"),
+                        "pos_id":       gr.get("pos_id", ""),
+                        "pos_machine":  gr.get("pos_machine", ""),
+                        "rcpt_no":      gr.get("rcpt_no", ""),
+                        "total_amount": float(gr.get("total_amount", 0)),
+                        "cash": 0.0, "change": 0.0,
+                        "name": gr.get("branch", ""),
+                        "tax_id": "", "user": "",
+                    }
+                    raw_items = gr.get("items", [])
+                    items = []
+                    for it in raw_items:
+                        items.append({
+                            "ชื่อสินค้า":   it.get("ชื่อสินค้า", ""),
+                            "หมวดหมู่":     it.get("หมวดหมู่", "") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
+                            "จำนวน":       int(it.get("จำนวน", 1)),
+                            "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                            "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
+                        })
                     results.append({"filename": label, "bill": bill, "items": items,
-                                    "raw_text": text, "gdrive_raw": gdrive_raw,
-                                    "image": img_to_bytes_png(crop)})
+                                    "raw_text": "", "gdrive_raw": "",
+                                    "image": img_to_bytes_png(pil_to_cv(crop_pil))})
+                except Exception as _e:
+                    results.append({"filename": label,
+                        "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":str(_e),"name":"ไม่พบ",
+                                 "total_amount":0.0,"cash":0.0,"change":0.0,
+                                 "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
+                        "items": [], "raw_text": f"[Gemini error: {_e}]",
+                        "image": img_to_bytes_png(img_cv)})
+
         except Exception as e:
             results.append({"filename": fname,
                             "bill": {"date":"ไม่พบ","time":"ไม่พบ","branch":"ไม่พบ","name":"ไม่พบ",
-                                     "total_amount":0.0,"cash":0.0,"change":0.0,"pos_machine":"ไม่พบ",
-                                     "pos_id":"ไม่พบ","rcpt_no":"ไม่พบ","tax_id":"ไม่พบ","user":"ไม่พบ"},
-                            "items": [], "raw_text": f"[ERROR] {e}", "image": None})
+                                     "total_amount":0.0,"cash":0.0,"change":0.0,
+                                     "pos_machine":"","pos_id":"","rcpt_no":"","tax_id":"","user":""},
+                            "items": [], "raw_text": f"[error: {e}]",
+                            "image": b""})
     return results
+
 
 def run_batch_mode_ui():
     st.markdown(f'<p class="sec-header">{t("upload_label")}</p>', unsafe_allow_html=True)
@@ -2451,7 +2588,7 @@ def run_batch_mode_ui():
                 horizontal=True, key="batch_bills_per_image_radio")
             S["batch_bills_per_image"] = bills_per_img
             if bills_per_img > 1:
-                st.info(f"✅ จะ split รูปแล้ว Google Drive OCR ทีละบิล → Gemini วิเคราะห์ทีละบิล")
+                st.info("✅ จะ split รูปแล้ว Gemini Vision วิเคราะห์ทีละบิล")
     else:
         S["batch_bills_per_image"] = 1
 
@@ -2579,52 +2716,20 @@ def main():
         nl = "th" if lc=="ไทย" else "en"
         if nl != S.lang: S.lang = nl; st.rerun()
 
-    with st.expander("⚙️ ตัวเลือก OCR Engine", expanded=False):
-        if "_gdrive_warning" in S:
-            st.warning(f"⚠️ Google Drive OCR error: {S._gdrive_warning}")
-            del S["_gdrive_warning"]
-        if "_vision_api_warning" in S:
-            st.warning(f"⚠️ Google Vision API error: {S._vision_api_warning}")
-            del S["_vision_api_warning"]
-
-        gdrive_ready = is_gdrive_configured()
-        vision_ready = is_vision_api_configured()
-        engine_options = [
-            "🆓 Tesseract (ฟรี, รันในเครื่อง)",
-            f"📄 Google Drive OCR {'✅' if is_gdrive_token_ready() else ('🔑 ต้อง Login' if gdrive_ready else '⚙️ ต้องตั้งค่า')} (ฟรี ไม่จำกัด)",
-            f"🎯 Google Cloud Vision API {'✅' if vision_ready else '⚙️ ต้องตั้งค่า'} (แม่นสุด)",
-        ]
-        engine_map = ["tesseract", "gdrive", "vision"]
-        current_idx = engine_map.index(S.ocr_engine) if S.ocr_engine in engine_map else 0
-        choice = st.radio("เลือก OCR Engine", engine_options, index=current_idx,
-                          key="ocr_engine_radio", label_visibility="collapsed")
-        new_engine = engine_map[engine_options.index(choice)]
-        if new_engine != S.ocr_engine:
-            S.ocr_engine = new_engine
-        if S.ocr_engine == "gdrive":
-            render_gdrive_login_ui()
-        elif S.ocr_engine == "vision":
-            if vision_ready:
-                st.success("✅ ตั้งค่า Google Vision API key แล้ว")
-            else:
-                st.warning("⚠️ ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
-        else:
-            st.caption("💡 Tesseract ฟรีและรันในเครื่องทั้งหมด แต่แม่นน้อยกว่า")
-
-        gemini_ready = is_gemini_configured()
-        st.divider()
-        st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text**")
-        if gemini_ready:
-            st.success("✅ ตั้งค่า Gemini API key แล้ว — ฟรี 1,500 requests/วัน")
-        else:
-            st.info("💡 เพิ่ม GEMINI_API_KEY ใน `.streamlit/secrets.toml` เพื่อแม่นขึ้น")
-
-        with st.expander("📊 เปรียบเทียบ OCR Engine"):
-            st.markdown("""| Engine | ค่าใช้จ่าย | ความแม่น | ภาษาไทย | Speed |
-|--------|-----------|---------|---------|-------|
-| 🆓 Tesseract | ฟรี | ⭐⭐ | พอใช้ | ⚡⚡⚡ |
-| 📄 **Drive OCR + Gemini** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | **ดีมาก** | ⚡⚡ |
-| 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ดีมาก | ⚡⚡ |""")
+    # ── Gemini API status ─────────────────────────────────────────────────────
+    S.ocr_engine = "gemini"
+    keys = _get_gemini_keys()
+    n_keys = len(keys)
+    if n_keys >= 2:
+        st.success(f"✅ Gemini API พร้อม — **{n_keys} keys** (RPM รวม ~{n_keys*15} req/นาที) 🚀")
+    elif n_keys == 1:
+        st.success("✅ Gemini API พร้อม — 1 key (15 RPM)")
+        st.info("💡 **เพิ่มความเร็ว:** ใส่หลาย API key ใน secrets.toml\n"
+                "```toml\nGEMINI_API_KEY = \"key1,key2,key3,key4\"\n```\n"
+                "4 key ฟรี = 60 RPM = เร็วขึ้น 4 เท่า สมัคร key เพิ่มที่ aistudio.google.com")
+    else:
+        st.warning("⚠️ ยังไม่ได้ตั้งค่า GEMINI_API_KEY\n"
+                   "เพิ่มใน `.streamlit/secrets.toml`: `GEMINI_API_KEY = 'your-key'`")
 
     st.markdown(f'<p class="sec-header">{t("mode_label")}</p>', unsafe_allow_html=True)
     m1, m2 = st.columns(2)
@@ -2755,50 +2860,56 @@ def main():
         if blur_score < 30:
             st.warning(f"⚠️ รูปไม่ชัด (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
 
-        engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
-                        "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
-        st.caption(f"Engine: **{engine_label}**")
+        w_orig, h_orig = working_pil.size
+        resize_note = " → resize 1024px" if max(w_orig,h_orig) > 1024 else ""
+        st.caption(f"✨ Gemini Flash-Lite | Files API + Key Rotation | {w_orig}×{h_orig}px{resize_note}")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
-                with st.spinner("กำลัง OCR..."):
-                    img_cv = pil_to_cv(working_pil)
-                    all_bills = []
-                    fname = (S.gallery_files[S.selected_idx][0]
-                             if 0 <= S.selected_idx < len(S.gallery_files) else "image")
-                    progress = st.progress(0, text="เริ่มต้น OCR...")
-
-                    # 1 บิลต่อรูปเสมอ
-                    crops = [img_cv]
-
-                    for ci, crop in enumerate(crops):
-                        label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
-                        progress.progress((ci) / len(crops),
-                            text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
-                        st.session_state["_gdrive_raw_texts"] = []
-                        text       = run_ocr(crop, engine=S.ocr_engine)
-                        gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
-                        if is_gemini_configured() and text_for_gemini.strip():
-                            progress.progress((ci + 0.5) / len(crops),
-                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
-                            gemini_result = extract_with_gemini(
-                                text_for_gemini,
-                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract")
-                            if gemini_result["ok"] and gemini_result["items"]:
-                                bill  = gemini_result["bill"]
-                                items = gemini_result["items"]
-                            else:
-                                bill  = extract_receipt(text)
-                                items = extract_items_cj(text)
-                        else:
-                            bill  = extract_receipt(text)
-                            items = extract_items_cj(text)
-                        all_bills.append({"filename":label,"bill":bill,"items":items,
-                                          "raw_text":text,"gdrive_raw":gdrive_raw,
-                                          "image":img_to_bytes_png(crop)})
-                    progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
-
-                    S.all_bills = all_bills; S.step=3; st.rerun()
+            if not is_gemini_configured():
+                st.error("❌ กรุณาตั้งค่า GEMINI_API_KEY ก่อนใช้งาน")
+                st.stop()
+            with st.spinner("📤 กำลังส่งรูปให้ Gemini Vision..."):
+                fname = (S.gallery_files[S.selected_idx][0]
+                         if 0 <= S.selected_idx < len(S.gallery_files) else "image")
+                progress = st.progress(0, text="📤 ส่งรูปให้ Gemini...")
+                all_bills = []
+                try:
+                    progress.progress(0.3, text="🔍 Gemini กำลังอ่านใบเสร็จ...")
+                    gemini_result = call_gemini_vision(
+                        image_path=None,
+                        api_key=_get_gemini_key(),
+                        pil_image=working_pil,
+                    )
+                    progress.progress(0.8, text="📋 แปลงผลลัพธ์...")
+                    bill = {
+                        "date":         gemini_result.get("date", "ไม่พบ"),
+                        "time":         gemini_result.get("time", "ไม่พบ"),
+                        "branch":       gemini_result.get("branch", "ไม่พบ"),
+                        "pos_id":       gemini_result.get("pos_id", ""),
+                        "pos_machine":  gemini_result.get("pos_machine", ""),
+                        "rcpt_no":      gemini_result.get("rcpt_no", ""),
+                        "total_amount": float(gemini_result.get("total_amount", 0)),
+                        "cash": 0.0, "change": 0.0,
+                    }
+                    raw_items = gemini_result.get("items", [])
+                    items = []
+                    for it in raw_items:
+                        items.append({
+                            "ชื่อสินค้า":   it.get("ชื่อสินค้า", ""),
+                            "หมวดหมู่":     it.get("หมวดหมู่", "") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
+                            "จำนวน":       int(it.get("จำนวน", 1)),
+                            "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                            "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
+                        })
+                    img_bytes = img_to_bytes_png(pil_to_cv(working_pil))
+                    all_bills.append({"filename": fname, "bill": bill, "items": items,
+                                      "raw_text": "", "gdrive_raw": "", "image": img_bytes})
+                    progress.progress(1.0, text="✅ Gemini Vision เสร็จสิ้น")
+                except Exception as _e:
+                    progress.progress(1.0, text="❌ Error")
+                    st.error(f"❌ Gemini error: {_e}")
+                    st.stop()
+                S.all_bills = all_bills; S.step=3; st.rerun()
 
     if S.all_bills:
         _render_bills_ui(S.all_bills, key_prefix="s")
@@ -2814,5 +2925,546 @@ def main():
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
 
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BATCH OCR MODULE — วิเคราะห์รูปใบเสร็จทีละมากๆ ด้วย Gemini Vision
+# ใช้งาน: python ocr.py --input ./receipts --output ./results --excel out.xlsx
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── ตั้งค่า ──────────────────────────────────────────────────────────────────
+# _GEMINI_API_URL defined above
+SUPPORTED_EXT  = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+SLEEP_BETWEEN  = 1.2   # วินาที ระหว่างแต่ละ request (safe สำหรับ free tier 15 RPM)
+MAX_RETRY      = 3     # retry สูงสุด
+RETRY_DELAY    = 5     # วินาที รอก่อน retry
+
+# ─── Prompt ───────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """คุณคือระบบอ่านใบเสร็จ CJ More (CJ Express) จากภาพ
+ตอบด้วย JSON เท่านั้น ห้ามมีข้อความอื่นนอกจาก JSON
+
+JSON format (ใช้ field ชื่อนี้เท่านั้น):
+{"date":"DD/MM/YYYY","time":"HH:MM","branch":"ชื่อสาขา","pos_id":"4หลักจาก BNO","pos_machine":"NXX","rcpt_no":"เลขท้าย BNO","total_amount":0.0,"items":[{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}]}
+
+กฎ (สำคัญมาก):
+1. BNO "BNO:S26061653N02-003331" → pos_id=1653, pos_machine=N02, rcpt_no=003331
+2. Bao Cafe: Bag/Bac/B4o/BAO/Beo/Ba0/8ao → "Bao ..." หมวด "Bao Cafe"
+3. ส่วนลด/โปรโมชั่น → หมวด "ส่วนลด/โปรโมชั่น", ยอดรวมสินค้า = ค่าลบ
+4. "หวานน้อย/ไม่หวาน/หวานปกติ" = note ของ Bao ไม่ใช่สินค้า
+5. ราคาหลัง QR ธนาคาร/เงินสด/เงินทอน = payment ไม่ใช่สินค้า
+6. ถ้ามี subtotal บวก + discount ลบติดกัน → ใช้ค่าลบเป็นส่วนลด
+
+หมวดหมู่: Bao Cafe | อาหารพร้อมทานและเบเกอรี่ | ขนมและของขบเคี้ยว | เครื่องดื่ม | ของใช้ส่วนตัว | ของใช้ในบ้าน | เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ | สินค้าเบ็ดเตล็ดอื่นๆ | ส่วนลด/โปรโมชั่น"""
+
+# ─── Utility Functions ────────────────────────────────────────────────────────
+# get_api_key → replaced by _get_gemini_key()
+def image_to_base64(path: Path) -> tuple[str, str]:
+    """แปลงรูปเป็น base64 และ media_type"""
+    ext = path.suffix.lower()
+    media_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png",  ".webp": "image/webp",
+        ".heic": "image/heic", ".heif": "image/heif",
+    }
+    media_type = media_map.get(ext, "image/jpeg")
+    data = base64.b64encode(path.read_bytes()).decode("utf-8")
+    return data, media_type
+
+
+_FILES_API_UPLOAD = "https://generativelanguage.googleapis.com/upload/v1beta/files"
+_file_uri_cache: dict = {}   # cache: md5 → file_uri (ไม่ upload ซ้ำรูปเดิม)
+
+def _upload_to_files_api(img_bytes: bytes, api_key: str) -> str:
+    """อัปโหลดรูปไปยัง Gemini Files API → คืน file_uri
+    ถ้า upload ไม่สำเร็จ คืน "" (fallback base64)
+    """
+    import hashlib
+    import requests as _req
+
+    # ตรวจ cache ก่อน (รูปเดิมไม่ต้อง upload ซ้ำ)
+    digest = hashlib.md5(img_bytes).hexdigest()
+    if digest in _file_uri_cache:
+        return _file_uri_cache[digest]
+
+    try:
+        # Step 1: initiate upload
+        init_resp = _req.post(
+            f"{_FILES_API_UPLOAD}?key={api_key}",
+            headers={
+                "X-Goog-Upload-Protocol": "resumable",
+                "X-Goog-Upload-Command": "start",
+                "X-Goog-Upload-Header-Content-Length": str(len(img_bytes)),
+                "X-Goog-Upload-Header-Content-Type": "image/jpeg",
+                "Content-Type": "application/json",
+            },
+            json={"file": {"display_name": f"receipt_{digest[:8]}"}},
+            timeout=15,
+        )
+        if init_resp.status_code not in (200, 308):
+            return ""
+
+        upload_url = init_resp.headers.get("X-Goog-Upload-URL", "")
+        if not upload_url:
+            return ""
+
+        # Step 2: upload bytes
+        up_resp = _req.post(
+            upload_url,
+            headers={
+                "Content-Length": str(len(img_bytes)),
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+                "Content-Type": "image/jpeg",
+            },
+            data=img_bytes,
+            timeout=30,
+        )
+        if up_resp.status_code not in (200, 308):
+            return ""
+
+        file_info = up_resp.json()
+        uri = file_info.get("file", {}).get("uri", "")
+        if uri:
+            _file_uri_cache[digest] = uri   # cache ไว้
+        return uri
+
+    except Exception:
+        return ""   # fallback base64
+
+
+def call_gemini_vision(image_path, api_key: str, pil_image=None) -> dict:
+    """ส่งรูปให้ Gemini Vision พร้อม retry + exponential backoff
+    รับได้ทั้ง image_path (Path) หรือ pil_image (PIL.Image)
+    """
+    import requests
+
+    import io as _io
+
+    # ── เตรียมรูป: resize ไม่เกิน 1024px ──────────────────────────────────────
+    if pil_image is not None:
+        src = pil_image
+    else:
+        src = Image.open(image_path).convert("RGB")
+
+    W, H = src.size
+    if max(W, H) > 1024:
+        scale = 1024 / max(W, H)
+        src = src.resize((int(W*scale), int(H*scale)), Image.LANCZOS)
+
+    buf = _io.BytesIO()
+    src.save(buf, format="JPEG", quality=80)
+    img_bytes = buf.getvalue()
+
+    # ── ลอง Files API ก่อน (เร็วกว่า) → fallback base64 ─────────────────────
+    file_uri = _upload_to_files_api(img_bytes, api_key)
+    if file_uri:
+        # ส่ง URI แทน base64 (payload เล็กลง ~100x)
+        img_part = {"file_data": {"mime_type": "image/jpeg", "file_uri": file_uri}}
+    else:
+        # fallback: inline base64
+        img_data   = base64.b64encode(img_bytes).decode("utf-8")
+        img_part   = {"inline_data": {"mime_type": "image/jpeg", "data": img_data}}
+
+    payload = {
+        "contents": [{
+            "parts": [img_part, {"text": SYSTEM_PROMPT}]
+        }],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 2000},
+    }
+
+    # ── Key rotation + retry ───────────────────────────────────────────────────
+    keys = _get_gemini_keys()
+    if not keys:
+        raise RuntimeError("ไม่พบ GEMINI_API_KEY")
+
+    tried_keys = set()
+    wait_sec   = 5
+
+    for attempt in range(999):
+        untried = [k for k in keys if k not in tried_keys]
+        if untried:
+            current_key = untried[0]
+        else:
+            wait_show = min(wait_sec, 60)
+            try:
+                import streamlit as _st
+                for r in range(wait_show, 0, -1):
+                    try: _st.toast(f"⏳ รอ {r}s ให้ rate limit reset ({len(keys)} key)")
+                    except: pass
+                    time.sleep(1)
+            except:
+                time.sleep(wait_show)
+            tried_keys.clear()
+            wait_sec = min(wait_sec * 2, 60)
+            current_key = keys[0]
+
+        _url = _GEMINI_API_URL_LITE if attempt < len(keys) * 3 else _GEMINI_API_URL
+        try:
+            resp = requests.post(f"{_url}?key={current_key}", json=payload, timeout=60)
+            if resp.status_code == 429:
+                tried_keys.add(current_key)
+                continue
+            if resp.status_code == 503:
+                time.sleep(3); continue
+            resp.raise_for_status()
+            data     = resp.json()
+            raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+            raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
+            return json.loads(raw_text)
+        except requests.exceptions.Timeout:
+            time.sleep(5); continue
+        except json.JSONDecodeError as e:
+            raise ValueError(f"JSON parse error: {e}\nRaw: {raw_text[:300]}")
+
+
+class RateLimitError(Exception):
+    pass
+
+
+def process_single_image(image_path: Path, api_key: str, output_dir: Path) -> bool:
+    """
+    Process รูป 1 ใบ → บันทึก JSON
+    คืนค่า True ถ้าสำเร็จ, False ถ้าข้ามเพราะ error ถาวร
+    """
+    out_file = output_dir / f"{image_path.stem}.json"
+
+    # ข้ามถ้าประมวลแล้ว
+    if out_file.exists():
+        print(f"  ⏭️  ข้าม (มีแล้ว): {image_path.name}")
+        return True
+
+    for attempt in range(1, MAX_RETRY + 1):
+        try:
+            print(f"  📤 ส่ง: {image_path.name} (attempt {attempt}/{MAX_RETRY})", end="", flush=True)
+            result = call_gemini_vision(image_path, api_key)
+
+            # เพิ่ม metadata
+            result["_source_file"] = image_path.name
+            result["_processed_at"] = datetime.now().isoformat(timespec="seconds")
+
+            out_file.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            print(f"  ✅  บันทึก {out_file.name}")
+            return True
+
+        except RateLimitError:
+            wait = RETRY_DELAY * attempt
+            print(f"  ⏳ rate limit → รอ {wait}s แล้ว retry...")
+            time.sleep(wait)
+
+        except requests.exceptions.Timeout:
+            print(f"  ⏰ timeout → retry {attempt}")
+            time.sleep(RETRY_DELAY)
+
+        except requests.exceptions.ConnectionError:
+            print(f"  🔌 connection error → retry {attempt}")
+            time.sleep(RETRY_DELAY * 2)
+
+        except ValueError as e:
+            # JSON parse error — บันทึก raw เพื่อ debug
+            err_file = output_dir / f"{image_path.stem}_ERROR.txt"
+            err_file.write_text(str(e))
+            print(f"  ⚠️  JSON error บันทึก log ไว้ที่ {err_file.name}")
+            return False  # ไม่ retry
+
+        except Exception as e:
+            print(f"  ❌ error: {e}")
+            if attempt == MAX_RETRY:
+                return False
+            time.sleep(RETRY_DELAY)
+
+    print(f"  ❌ {image_path.name} ล้มเหลวหลัง {MAX_RETRY} ครั้ง")
+    return False
+
+
+# ─── Merge JSON → Excel/CSV ───────────────────────────────────────────────────
+def merge_results(json_dir: Path, output_file: Path):
+    """รวม JSON ทั้งหมดเป็น Excel หรือ CSV"""
+    json_files = sorted(json_dir.glob("*.json"))
+    if not json_files:
+        print("❌ ไม่พบไฟล์ JSON ใน", json_dir)
+        return
+
+    print(f"📊 รวม {len(json_files)} ไฟล์ JSON...")
+
+    rows = []
+    for jf in json_files:
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"  ⚠️  ข้าม {jf.name}: {e}")
+            continue
+
+        bill_info = {
+            "ไฟล์":          data.get("_source_file", jf.stem),
+            "วันที่":         data.get("date", ""),
+            "เวลา":          data.get("time", ""),
+            "รหัสสาขา":      data.get("pos_id", ""),
+            "POS ID":        data.get("pos_machine", ""),
+            "เลขที่ใบเสร็จ": data.get("rcpt_no", ""),
+            "ยอดรวม":        data.get("total_amount", 0),
+        }
+
+        items = data.get("items", [])
+        if not items:
+            rows.append({**bill_info,
+                "ชื่อสินค้า": "(ไม่พบรายการ)", "หมวดหมู่": "",
+                "จำนวน": 0, "ราคาต่อหน่วย": 0, "ยอดรวมสินค้า": 0,
+                "ชื่อส่วนลด/โปรโม": "", "มูลค่าส่วนลด": 0,
+            })
+        else:
+            for it in items:
+                name      = it.get("ชื่อสินค้า", "")
+                cat       = it.get("หมวดหมู่", "")
+                qty       = it.get("จำนวน", 1)
+                unit      = it.get("ราคาต่อหน่วย", 0.0)
+                total     = it.get("ยอดรวมสินค้า", 0.0)
+                is_promo  = cat == "ส่วนลด/โปรโมชั่น" or total < 0
+
+                rows.append({
+                    **bill_info,
+                    "ชื่อสินค้า":       "" if is_promo else name,
+                    "หมวดหมู่":         "" if is_promo else cat,
+                    "จำนวน":           0  if is_promo else qty,
+                    "ราคาต่อหน่วย":    0  if is_promo else unit,
+                    "ยอดรวมสินค้า":    0  if is_promo else total,
+                    "ชื่อส่วนลด/โปรโม": name  if is_promo else "",
+                    "มูลค่าส่วนลด":     total if is_promo else 0,
+                })
+
+    ext = output_file.suffix.lower()
+    if ext in (".xlsx", ".xls"):
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "รายการสินค้า"
+
+            if not rows:
+                print("⚠️  ไม่มีข้อมูล")
+                return
+
+            cols = list(rows[0].keys())
+            # Header
+            HEADER_FILL = PatternFill("solid", fgColor="1F3864")
+            for ci, col in enumerate(cols, 1):
+                cell = ws.cell(row=1, column=ci, value=col)
+                cell.font      = Font(bold=True, color="FFFFFF", size=11)
+                cell.fill      = HEADER_FILL
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Data
+            for ri, row in enumerate(rows, 2):
+                for ci, col in enumerate(cols, 1):
+                    val = row.get(col, "")
+                    cell = ws.cell(row=ri, column=ci, value=val)
+                    cell.alignment = Alignment(vertical="center")
+                    if ri % 2 == 0:
+                        cell.fill = PatternFill("solid", fgColor="EEF2FF")
+
+            # Column widths
+            widths = [22,12,8,10,8,22,10,30,20,6,14,14,25,14]
+            for ci, w in enumerate(widths[:len(cols)], 1):
+                ws.column_dimensions[get_column_letter(ci)].width = w
+
+            ws.row_dimensions[1].height = 20
+            ws.freeze_panes = "A2"
+
+            wb.save(output_file)
+            print(f"✅ บันทึก Excel: {output_file}  ({len(rows)} แถว)")
+
+        except ImportError:
+            print("⚠️  ไม่มี openpyxl — บันทึกเป็น CSV แทน")
+            output_file = output_file.with_suffix(".csv")
+            ext = ".csv"
+
+    if ext == ".csv":
+        import csv
+        with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
+            if rows:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+        print(f"✅ บันทึก CSV: {output_file}  ({len(rows)} แถว)")
+
+    # สรุป
+    n_bills   = len(json_files)
+    n_items   = sum(1 for r in rows if r.get("ชื่อสินค้า"))
+    n_promos  = sum(1 for r in rows if r.get("ชื่อส่วนลด/โปรโม"))
+    print(f"\n📈 สรุป: {n_bills} บิล | {n_items} รายการสินค้า | {n_promos} รายการส่วนลด")
+
+
+# ─── Main Batch Loop ──────────────────────────────────────────────────────────
+def run_batch(input_dir: Path, output_dir: Path, batch_size: int = 100):
+    api_key = _get_gemini_key()
+    if not api_key:
+        print("❌ ไม่พบ GEMINI_API_KEY"); sys.exit(1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # หาไฟล์รูปทั้งหมด
+    images = sorted([
+        f for f in input_dir.iterdir()
+        if f.suffix.lower() in SUPPORTED_EXT
+    ])
+
+    if not images:
+        print(f"❌ ไม่พบรูปใน {input_dir}")
+        print(f"   รองรับ: {', '.join(SUPPORTED_EXT)}")
+        sys.exit(1)
+
+    total = len(images)
+    print(f"🗂️  พบ {total} รูป ใน {input_dir}")
+    print(f"💾 บันทึก JSON ไปที่: {output_dir}")
+    print(f"⏱️  sleep {SLEEP_BETWEEN}s ระหว่าง request (rate-limit safe)")
+    print(f"🔄 retry สูงสุด {MAX_RETRY} ครั้ง/รูป")
+    print("─" * 60)
+
+    success = 0; skipped = 0; failed = 0
+    start_time = time.time()
+
+    for idx, img_path in enumerate(images, 1):
+        # Progress
+        print(f"\n[{idx:3d}/{total}] {img_path.name}")
+
+        # Process batch
+        ok = process_single_image(img_path, api_key, output_dir)
+
+        if ok:
+            # ตรวจว่าเพิ่งทำ หรือข้าม (มีแล้ว)
+            out_file = output_dir / f"{img_path.stem}.json"
+            if "ข้าม" in "":  # placeholder
+                skipped += 1
+            else:
+                success += 1
+        else:
+            failed += 1
+
+        # Rate limit delay (ยกเว้นรูปสุดท้าย)
+        if idx < total:
+            time.sleep(SLEEP_BETWEEN)
+
+        # Progress summary ทุก 10 รูป
+        if idx % 10 == 0 or idx == total:
+            elapsed  = time.time() - start_time
+            per_img  = elapsed / idx
+            remaining = per_img * (total - idx)
+            print(f"\n  📊 Progress: {idx}/{total} | "
+                  f"✅{success} ⏭️{skipped} ❌{failed} | "
+                  f"เวลา: {elapsed:.0f}s | "
+                  f"เหลือ ~{remaining:.0f}s")
+
+    elapsed = time.time() - start_time
+    print("\n" + "─" * 60)
+    print(f"🏁 เสร็จสิ้น: {total} รูป ใช้เวลา {elapsed:.1f}s ({elapsed/60:.1f} นาที)")
+    print(f"   ✅ สำเร็จ: {success} | ⏭️ ข้ามแล้ว: {skipped} | ❌ ล้มเหลว: {failed}")
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+def _batch_main():
+    parser = argparse.ArgumentParser(
+        description="CJ Express Batch OCR — ส่งรูปให้ Gemini Vision",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+ตัวอย่าง:
+  # วิเคราะห์รูปทั้งหมดใน ./receipts → JSON ใน ./results
+  python cj_batch_ocr.py --input ./receipts --output ./results
+
+  # รวม JSON เป็น Excel
+  python cj_batch_ocr.py --merge ./results --excel output.xlsx
+
+  # ทำทั้งหมดในคำสั่งเดียว
+  python cj_batch_ocr.py --input ./receipts --output ./results --excel output.xlsx
+
+  # กำหนด batch size (default=100)
+  python cj_batch_ocr.py --input ./receipts --output ./results --batch 40
+
+ตั้งค่า API Key:
+  export GEMINI_API_KEY="your-key-here"
+  หรือสร้างไฟล์ .env แล้วใส่: GEMINI_API_KEY=your-key-here
+        """
+    )
+    parser.add_argument("--input",  "-i", type=Path, help="โฟลเดอร์รูปใบเสร็จ")
+    parser.add_argument("--output", "-o", type=Path, help="โฟลเดอร์บันทึก JSON", default=Path("./json_results"))
+    parser.add_argument("--merge",  "-m", type=Path, help="โฟลเดอร์ JSON ที่จะ merge")
+    parser.add_argument("--excel",  "-e", type=Path, help="ไฟล์ Excel/CSV ที่จะบันทึก")
+    parser.add_argument("--batch",  "-b", type=int,  help="จำนวนรูปต่อ batch (default=100)", default=100)
+    parser.add_argument("--sleep",  "-s", type=float,
+                        help=f"วินาทีระหว่าง request (default={SLEEP_BETWEEN})",
+                        default=SLEEP_BETWEEN)
+
+    args = parser.parse_args()
+
+    SLEEP_BETWEEN = args.sleep
+
+    if not args.input and not args.merge:
+        parser.print_help()
+        sys.exit(0)
+
+    # Step 1: วิเคราะห์รูป
+    if args.input:
+        run_batch(args.input, args.output, args.batch)
+
+    # Step 2: merge → Excel
+    if args.merge or (args.input and args.excel):
+        merge_dir = args.merge or args.output
+        out_file  = args.excel or (merge_dir / "receipts_summary.xlsx")
+        merge_results(merge_dir, out_file)
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+def _batch_main():
+    parser = argparse.ArgumentParser(
+        description="CJ Express Batch OCR — ส่งรูปให้ Gemini Vision",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+ตัวอย่าง:
+  # วิเคราะห์รูปทั้งหมดใน ./receipts → JSON ใน ./results
+  python cj_batch_ocr.py --input ./receipts --output ./results
+
+  # รวม JSON เป็น Excel
+  python cj_batch_ocr.py --merge ./results --excel output.xlsx
+
+  # ทำทั้งหมดในคำสั่งเดียว
+  python cj_batch_ocr.py --input ./receipts --output ./results --excel output.xlsx
+
+  # กำหนด batch size (default=100)
+  python cj_batch_ocr.py --input ./receipts --output ./results --batch 40
+
+ตั้งค่า API Key:
+  export GEMINI_API_KEY="your-key-here"
+  หรือสร้างไฟล์ .env แล้วใส่: GEMINI_API_KEY=your-key-here
+        """
+    )
+    parser.add_argument("--input",  "-i", type=Path, help="โฟลเดอร์รูปใบเสร็จ")
+    parser.add_argument("--output", "-o", type=Path, help="โฟลเดอร์บันทึก JSON", default=Path("./json_results"))
+    parser.add_argument("--merge",  "-m", type=Path, help="โฟลเดอร์ JSON ที่จะ merge")
+    parser.add_argument("--excel",  "-e", type=Path, help="ไฟล์ Excel/CSV ที่จะบันทึก")
+    parser.add_argument("--batch",  "-b", type=int,  help="จำนวนรูปต่อ batch (default=100)", default=100)
+    parser.add_argument("--sleep",  "-s", type=float,help=f"วินาทีระหว่าง request (default={SLEEP_BETWEEN})", default=SLEEP_BETWEEN)
+
+    args = parser.parse_args()
+
+
+    if not args.input and not args.merge:
+        parser.print_help()
+        sys.exit(0)
+
+    # Step 1: วิเคราะห์รูป
+    if args.input:
+        run_batch(args.input, args.output, args.batch)
+
+    # Step 2: merge → Excel
+    if args.merge or (args.input and args.excel):
+        merge_dir = args.merge or args.output
+        out_file  = args.excel or (merge_dir / "receipts_summary.xlsx")
+        merge_results(merge_dir, out_file)
+
 if __name__ == "__main__":
-    main()
+    # ถ้ามี argument → รัน batch mode
+    # ถ้าไม่มี → รัน Streamlit app
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("--server"):
+        _batch_main()
+    else:
+        main()

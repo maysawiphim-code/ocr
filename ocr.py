@@ -2690,20 +2690,58 @@ def main():
         nl = "th" if lc=="ไทย" else "en"
         if nl != S.lang: S.lang = nl; st.rerun()
 
-    # ── Gemini API status ─────────────────────────────────────────────────────
-    S.ocr_engine = "gemini"
-    keys = _get_gemini_keys()
-    n_keys = len(keys)
-    if n_keys >= 2:
-        st.success(f"✅ Gemini API พร้อม — **{n_keys} keys** (RPM รวม ~{n_keys*15} req/นาที) 🚀")
-    elif n_keys == 1:
-        st.success("✅ Gemini API พร้อม — 1 key (15 RPM)")
-        st.info("💡 **เพิ่มความเร็ว:** ใส่หลาย API key ใน secrets.toml\n"
-                "```toml\nGEMINI_API_KEY = \"key1,key2,key3,key4\"\n```\n"
-                "4 key ฟรี = 60 RPM = เร็วขึ้น 4 เท่า สมัคร key เพิ่มที่ aistudio.google.com")
-    else:
-        st.warning("⚠️ ยังไม่ได้ตั้งค่า GEMINI_API_KEY\n"
-                   "เพิ่มใน `.streamlit/secrets.toml`: `GEMINI_API_KEY = 'your-key'`")
+    with st.expander("⚙️ ตัวเลือก OCR Engine", expanded=False):
+        if "_gdrive_warning" in S:
+            st.warning(f"⚠️ Google Drive OCR error: {S._gdrive_warning}")
+            del S["_gdrive_warning"]
+        if "_vision_api_warning" in S:
+            st.warning(f"⚠️ Google Vision API error: {S._vision_api_warning}")
+            del S["_vision_api_warning"]
+
+        gdrive_ready = is_gdrive_configured()
+        vision_ready = is_vision_api_configured()
+        engine_options = [
+            "🆓 Tesseract (ฟรี, รันในเครื่อง)",
+            f"📄 Google Drive OCR {'✅' if is_gdrive_token_ready() else ('🔑 ต้อง Login' if gdrive_ready else '⚙️ ต้องตั้งค่า')} (ฟรี ไม่จำกัด)",
+            f"🎯 Google Cloud Vision API {'✅' if vision_ready else '⚙️ ต้องตั้งค่า'} (แม่นสุด)",
+        ]
+        engine_map = ["tesseract", "gdrive", "vision"]
+        current_idx = engine_map.index(S.ocr_engine) if S.ocr_engine in engine_map else 0
+        choice = st.radio("เลือก OCR Engine", engine_options, index=current_idx,
+                          key="ocr_engine_radio", label_visibility="collapsed")
+        new_engine = engine_map[engine_options.index(choice)]
+        if new_engine != S.ocr_engine:
+            S.ocr_engine = new_engine
+        if S.ocr_engine == "gdrive":
+            render_gdrive_login_ui()
+        elif S.ocr_engine == "vision":
+            if vision_ready:
+                st.success("✅ ตั้งค่า Google Vision API key แล้ว")
+            else:
+                st.warning("⚠️ ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
+        else:
+            st.caption("💡 Tesseract ฟรีและรันในเครื่องทั้งหมด แต่แม่นน้อยกว่า")
+
+        gemini_ready = is_gemini_configured()
+        st.divider()
+        st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text**")
+        if gemini_ready:
+            keys = _get_gemini_keys()
+            n_keys = len(keys)
+            if n_keys >= 2:
+                st.success(f"✅ Gemini API พร้อม — **{n_keys} keys** (RPM รวม ~{n_keys*15} req/นาที) 🚀")
+            else:
+                st.success("✅ ตั้งค่า Gemini API key แล้ว — ฟรี 1,500 requests/วัน")
+                st.info("💡 ใส่หลาย key เพื่อเพิ่ม RPM: `GEMINI_API_KEY = \"key1,key2,key3,key4\"`")
+        else:
+            st.info("💡 เพิ่ม GEMINI_API_KEY ใน `.streamlit/secrets.toml` เพื่อแม่นขึ้น")
+
+        with st.expander("📊 เปรียบเทียบ OCR Engine"):
+            st.markdown("""| Engine | ค่าใช้จ่าย | ความแม่น | ภาษาไทย | Speed |
+|--------|-----------|---------|---------|-------|
+| 🆓 Tesseract | ฟรี | ⭐⭐ | พอใช้ | ⚡⚡⚡ |
+| 📄 **Drive OCR + Gemini** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | **ดีมาก** | ⚡⚡ |
+| 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ดีมาก | ⚡⚡ |""")
 
     st.markdown(f'<p class="sec-header">{t("mode_label")}</p>', unsafe_allow_html=True)
     m1, m2 = st.columns(2)
@@ -2834,56 +2872,49 @@ def main():
         if blur_score < 30:
             st.warning(f"⚠️ รูปไม่ชัด (blur score: {blur_score:.0f}) — ผล OCR อาจไม่แม่น")
 
-        w_orig, h_orig = working_pil.size
-        resize_note = " → resize 1024px" if max(w_orig,h_orig) > 1024 else ""
-        st.caption(f"✨ Gemini Flash-Lite | Files API + Key Rotation | {w_orig}×{h_orig}px{resize_note}")
+        engine_label = {"tesseract": "🆓 Tesseract", "gdrive": "📄 Google Drive OCR",
+                        "vision": "🎯 Google Vision API"}.get(S.ocr_engine, S.ocr_engine)
+        st.caption(f"Engine: **{engine_label}**")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
-            if not is_gemini_configured():
-                st.error("❌ กรุณาตั้งค่า GEMINI_API_KEY ก่อนใช้งาน")
-                st.stop()
-            with st.spinner("📤 กำลังส่งรูปให้ Gemini Vision..."):
-                fname = (S.gallery_files[S.selected_idx][0]
-                         if 0 <= S.selected_idx < len(S.gallery_files) else "image")
-                progress = st.progress(0, text="📤 ส่งรูปให้ Gemini...")
-                all_bills = []
-                try:
-                    progress.progress(0.3, text="🔍 Gemini กำลังอ่านใบเสร็จ...")
-                    gemini_result = call_gemini_vision(
-                        image_path=None,
-                        api_key=_get_gemini_key(),
-                        pil_image=working_pil,
-                    )
-                    progress.progress(0.8, text="📋 แปลงผลลัพธ์...")
-                    bill = {
-                        "date":         gemini_result.get("date", "ไม่พบ"),
-                        "time":         gemini_result.get("time", "ไม่พบ"),
-                        "branch":       gemini_result.get("branch", "ไม่พบ"),
-                        "pos_id":       gemini_result.get("pos_id", ""),
-                        "pos_machine":  gemini_result.get("pos_machine", ""),
-                        "rcpt_no":      gemini_result.get("rcpt_no", ""),
-                        "total_amount": float(gemini_result.get("total_amount", 0)),
-                        "cash": 0.0, "change": 0.0,
-                    }
-                    raw_items = gemini_result.get("items", [])
-                    items = []
-                    for it in raw_items:
-                        items.append({
-                            "ชื่อสินค้า":   it.get("ชื่อสินค้า", ""),
-                            "หมวดหมู่":     it.get("หมวดหมู่", "") or _categorize_by_rule(it.get("ชื่อสินค้า","")),
-                            "จำนวน":       int(it.get("จำนวน", 1)),
-                            "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
-                            "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
-                        })
-                    img_bytes = img_to_bytes_png(pil_to_cv(working_pil))
-                    all_bills.append({"filename": fname, "bill": bill, "items": items,
-                                      "raw_text": "", "gdrive_raw": "", "image": img_bytes})
-                    progress.progress(1.0, text="✅ Gemini Vision เสร็จสิ้น")
-                except Exception as _e:
-                    progress.progress(1.0, text="❌ Error")
-                    st.error(f"❌ Gemini error: {_e}")
-                    st.stop()
-                S.all_bills = all_bills; S.step=3; st.rerun()
+                with st.spinner("กำลัง OCR..."):
+                    img_cv = pil_to_cv(working_pil)
+                    all_bills = []
+                    fname = (S.gallery_files[S.selected_idx][0]
+                             if 0 <= S.selected_idx < len(S.gallery_files) else "image")
+                    progress = st.progress(0, text="เริ่มต้น OCR...")
+
+                    crops = [img_cv]
+
+                    for ci, crop in enumerate(crops):
+                        label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
+                        progress.progress((ci) / len(crops),
+                            text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
+                        st.session_state["_gdrive_raw_texts"] = []
+                        text       = run_ocr(crop, engine=S.ocr_engine)
+                        gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+                        if is_gemini_configured() and text_for_gemini.strip():
+                            progress.progress((ci + 0.5) / len(crops),
+                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
+                            gemini_result = extract_with_gemini(
+                                text_for_gemini,
+                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract")
+                            if gemini_result["ok"] and gemini_result["items"]:
+                                bill  = gemini_result["bill"]
+                                items = gemini_result["items"]
+                            else:
+                                bill  = extract_receipt(text)
+                                items = extract_items_cj(text)
+                        else:
+                            bill  = extract_receipt(text)
+                            items = extract_items_cj(text)
+                        all_bills.append({"filename":label,"bill":bill,"items":items,
+                                          "raw_text":text,"gdrive_raw":gdrive_raw,
+                                          "image":img_to_bytes_png(crop)})
+                    progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
+
+                    S.all_bills = all_bills; S.step=3; st.rerun()
 
     if S.all_bills:
         _render_bills_ui(S.all_bills, key_prefix="s")

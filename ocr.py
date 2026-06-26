@@ -1,3 +1,4 @@
+import sys
 import streamlit as st
 from streamlit.components.v1 import html as st_html
 from PIL import Image
@@ -10,6 +11,12 @@ import numpy as np
 import os
 import base64
 import json
+
+# ── Batch OCR imports ─────────────────────────────────────────────────────────
+import time
+import argparse
+from pathlib import Path
+from datetime import datetime
 
 # ── Google Drive / Docs API ───────────────────────────────────────────────────
 try:
@@ -702,7 +709,7 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini API
 # ─────────────────────────────────────────────────────────────────────────────
-_GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+# GEMINI_API_URL defined above in ocr.py (_GEMINI_API_URL)
 
 def _get_gemini_key() -> str:
     try:
@@ -2814,5 +2821,473 @@ def main():
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
 
+
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BATCH OCR MODULE — วิเคราะห์รูปใบเสร็จทีละมากๆ ด้วย Gemini Vision
+# ใช้งาน: python ocr.py --input ./receipts --output ./results --excel out.xlsx
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── ตั้งค่า ──────────────────────────────────────────────────────────────────
+# GEMINI_API_URL defined above in ocr.py (_GEMINI_API_URL)
+SUPPORTED_EXT  = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+SLEEP_BETWEEN  = 1.2   # วินาที ระหว่างแต่ละ request (safe สำหรับ free tier 15 RPM)
+MAX_RETRY      = 3     # retry สูงสุด
+RETRY_DELAY    = 5     # วินาที รอก่อน retry
+
+# ─── Prompt ───────────────────────────────────────────────────────────────────
+SYSTEM_PROMPT = """วิเคราะห์ใบเสร็จ CJ MORE จากภาพนี้ แล้วตอบ JSON เท่านั้น ห้ามมีข้อความอื่น
+
+โครงสร้าง JSON ที่ต้องการ (ห้ามเพิ่ม/ลดฟิลด์):
+{
+  "date": "DD/MM/YYYY",
+  "time": "HH:MM",
+  "branch_name": "ชื่อสาขา เช่น มศว.องครักษ์",
+  "pos_id": "รหัสสาขา 4 หลัก จาก BNO เช่น 1653",
+  "pos_machine": "เครื่อง POS เช่น N02",
+  "receipt_no": "เลขที่ใบเสร็จท้าย BNO เช่น 003331",
+  "total_amount": 0.0,
+  "items": [
+    {
+      "name": "ชื่อสินค้า (แก้ OCR ให้ถูกต้อง)",
+      "category": "หมวดหมู่",
+      "qty": 1,
+      "unit_price": 0.0,
+      "total_price": 0.0
+    }
+  ]
+}
+
+กฎสำคัญ:
+1. BNO: "BNO:S26061653N02-003331" → pos_id="1653", pos_machine="N02", receipt_no="003331"
+2. Bao Cafe: Bag/Bac/B4o/BAO/Beo/Ba0/8ao → "Bao" เสมอ หมวด "Bao Cafe"
+   "Bao_อเมริกาโน่เป็น" = "Bao อเมริกาโน่เย็น" (_ = space, เป็น = เย็น)
+3. โปรโมชั่น/ส่วนลด → name = "โปรโมชั่น XXX", category = "ส่วนลด/โปรโมชั่น", total_price = ลบ
+   ถ้ามี subtotal บวกก่อน discount ลบ → ใช้ค่าลบ (discount จริง) ไม่ใช่ค่าบวก
+4. OCR ผิดพลาดให้แก้: "เป็น" → "เย็น", "บอลรวม" = ยอดรวม (ข้าม), "สานานสินค้ารามรายการ" = จำนวนสินค้า (ข้าม)
+5. ราคาหลัง QR ธนาคาร/เงินสด/เงินทอน คือ payment ไม่ใช่สินค้า
+6. "หวานน้อย" "ไม่หวาน" "หวานปกติ" = note ของ Bao ไม่ใช่สินค้า
+
+หมวดหมู่ที่ใช้ได้:
+- Bao Cafe
+- อาหารพร้อมทานและเบเกอรี่
+- ขนมและของขบเคี้ยว
+- เครื่องดื่ม
+- ของใช้ส่วนตัว
+- ของใช้ในบ้าน
+- เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ
+- สินค้าเบ็ดเตล็ดอื่นๆ
+- ส่วนลด/โปรโมชั่น"""
+
+# ─── Utility Functions ────────────────────────────────────────────────────────
+# get_api_key → replaced by _get_gemini_key()
+def image_to_base64(path: Path) -> tuple[str, str]:
+    """แปลงรูปเป็น base64 และ media_type"""
+    ext = path.suffix.lower()
+    media_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png",  ".webp": "image/webp",
+        ".heic": "image/heic", ".heif": "image/heif",
+    }
+    media_type = media_map.get(ext, "image/jpeg")
+    data = base64.b64encode(path.read_bytes()).decode("utf-8")
+    return data, media_type
+
+
+def call_gemini_vision(image_path: Path, api_key: str) -> dict:
+    """ส่งรูปให้ Gemini Vision และ parse JSON กลับ"""
+    import requests
+
+    img_data, media_type = image_to_base64(image_path)
+
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": media_type, "data": img_data}},
+                {"text": SYSTEM_PROMPT},
+            ]
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 2000,
+            "responseMimeType": "application/json",   # บังคับ Gemini ตอบ JSON
+        },
+    }
+
+    resp = requests.post(
+        f"{_GEMINI_API_URL}?key={api_key}",
+        json=payload,
+        timeout=60,
+    )
+
+    # Rate limit
+    if resp.status_code == 429:
+        raise RateLimitError("Rate limit hit")
+
+    resp.raise_for_status()
+    data = resp.json()
+    raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+
+    # clean ถ้า Gemini ใส่ ```json
+    raw_text = re.sub(r"```(?:json)?\s*|\s*```", "", raw_text).strip()
+
+    try:
+        result = json.loads(raw_text)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"JSON parse error: {e}\nRaw: {raw_text[:300]}")
+
+    return result
+
+
+class RateLimitError(Exception):
+    pass
+
+
+def process_single_image(image_path: Path, api_key: str, output_dir: Path) -> bool:
+    """
+    Process รูป 1 ใบ → บันทึก JSON
+    คืนค่า True ถ้าสำเร็จ, False ถ้าข้ามเพราะ error ถาวร
+    """
+    out_file = output_dir / f"{image_path.stem}.json"
+
+    # ข้ามถ้าประมวลแล้ว
+    if out_file.exists():
+        print(f"  ⏭️  ข้าม (มีแล้ว): {image_path.name}")
+        return True
+
+    for attempt in range(1, MAX_RETRY + 1):
+        try:
+            print(f"  📤 ส่ง: {image_path.name} (attempt {attempt}/{MAX_RETRY})", end="", flush=True)
+            result = call_gemini_vision(image_path, api_key)
+
+            # เพิ่ม metadata
+            result["_source_file"] = image_path.name
+            result["_processed_at"] = datetime.now().isoformat(timespec="seconds")
+
+            out_file.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            print(f"  ✅  บันทึก {out_file.name}")
+            return True
+
+        except RateLimitError:
+            wait = RETRY_DELAY * attempt
+            print(f"  ⏳ rate limit → รอ {wait}s แล้ว retry...")
+            time.sleep(wait)
+
+        except requests.exceptions.Timeout:
+            print(f"  ⏰ timeout → retry {attempt}")
+            time.sleep(RETRY_DELAY)
+
+        except requests.exceptions.ConnectionError:
+            print(f"  🔌 connection error → retry {attempt}")
+            time.sleep(RETRY_DELAY * 2)
+
+        except ValueError as e:
+            # JSON parse error — บันทึก raw เพื่อ debug
+            err_file = output_dir / f"{image_path.stem}_ERROR.txt"
+            err_file.write_text(str(e))
+            print(f"  ⚠️  JSON error บันทึก log ไว้ที่ {err_file.name}")
+            return False  # ไม่ retry
+
+        except Exception as e:
+            print(f"  ❌ error: {e}")
+            if attempt == MAX_RETRY:
+                return False
+            time.sleep(RETRY_DELAY)
+
+    print(f"  ❌ {image_path.name} ล้มเหลวหลัง {MAX_RETRY} ครั้ง")
+    return False
+
+
+# ─── Merge JSON → Excel/CSV ───────────────────────────────────────────────────
+def merge_results(json_dir: Path, output_file: Path):
+    """รวม JSON ทั้งหมดเป็น Excel หรือ CSV"""
+    json_files = sorted(json_dir.glob("*.json"))
+    if not json_files:
+        print("❌ ไม่พบไฟล์ JSON ใน", json_dir)
+        return
+
+    print(f"📊 รวม {len(json_files)} ไฟล์ JSON...")
+
+    rows = []
+    for jf in json_files:
+        try:
+            data = json.loads(jf.read_text(encoding="utf-8"))
+        except Exception as e:
+            print(f"  ⚠️  ข้าม {jf.name}: {e}")
+            continue
+
+        bill_info = {
+            "ไฟล์":          data.get("_source_file", jf.stem),
+            "วันที่":         data.get("date", ""),
+            "เวลา":          data.get("time", ""),
+            "รหัสสาขา":      data.get("pos_id", ""),
+            "POS ID":        data.get("pos_machine", ""),
+            "เลขที่ใบเสร็จ": data.get("receipt_no", ""),
+            "ยอดรวม":        data.get("total_amount", 0),
+        }
+
+        items = data.get("items", [])
+        if not items:
+            rows.append({**bill_info,
+                "ชื่อสินค้า": "(ไม่พบรายการ)", "หมวดหมู่": "",
+                "จำนวน": 0, "ราคาต่อหน่วย": 0, "ยอดรวมสินค้า": 0,
+                "ชื่อส่วนลด/โปรโม": "", "มูลค่าส่วนลด": 0,
+            })
+        else:
+            for it in items:
+                name      = it.get("name", "")
+                cat       = it.get("category", "")
+                qty       = it.get("qty", 1)
+                unit      = it.get("unit_price", 0.0)
+                total     = it.get("total_price", 0.0)
+                is_promo  = cat == "ส่วนลด/โปรโมชั่น" or total < 0
+
+                rows.append({
+                    **bill_info,
+                    "ชื่อสินค้า":       "" if is_promo else name,
+                    "หมวดหมู่":         "" if is_promo else cat,
+                    "จำนวน":           0  if is_promo else qty,
+                    "ราคาต่อหน่วย":    0  if is_promo else unit,
+                    "ยอดรวมสินค้า":    0  if is_promo else total,
+                    "ชื่อส่วนลด/โปรโม": name  if is_promo else "",
+                    "มูลค่าส่วนลด":     total if is_promo else 0,
+                })
+
+    ext = output_file.suffix.lower()
+    if ext in (".xlsx", ".xls"):
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
+            from openpyxl.utils import get_column_letter
+
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "รายการสินค้า"
+
+            if not rows:
+                print("⚠️  ไม่มีข้อมูล")
+                return
+
+            cols = list(rows[0].keys())
+            # Header
+            HEADER_FILL = PatternFill("solid", fgColor="1F3864")
+            for ci, col in enumerate(cols, 1):
+                cell = ws.cell(row=1, column=ci, value=col)
+                cell.font      = Font(bold=True, color="FFFFFF", size=11)
+                cell.fill      = HEADER_FILL
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+
+            # Data
+            for ri, row in enumerate(rows, 2):
+                for ci, col in enumerate(cols, 1):
+                    val = row.get(col, "")
+                    cell = ws.cell(row=ri, column=ci, value=val)
+                    cell.alignment = Alignment(vertical="center")
+                    if ri % 2 == 0:
+                        cell.fill = PatternFill("solid", fgColor="EEF2FF")
+
+            # Column widths
+            widths = [22,12,8,10,8,22,10,30,20,6,14,14,25,14]
+            for ci, w in enumerate(widths[:len(cols)], 1):
+                ws.column_dimensions[get_column_letter(ci)].width = w
+
+            ws.row_dimensions[1].height = 20
+            ws.freeze_panes = "A2"
+
+            wb.save(output_file)
+            print(f"✅ บันทึก Excel: {output_file}  ({len(rows)} แถว)")
+
+        except ImportError:
+            print("⚠️  ไม่มี openpyxl — บันทึกเป็น CSV แทน")
+            output_file = output_file.with_suffix(".csv")
+            ext = ".csv"
+
+    if ext == ".csv":
+        import csv
+        with open(output_file, "w", newline="", encoding="utf-8-sig") as f:
+            if rows:
+                writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                writer.writeheader()
+                writer.writerows(rows)
+        print(f"✅ บันทึก CSV: {output_file}  ({len(rows)} แถว)")
+
+    # สรุป
+    n_bills   = len(json_files)
+    n_items   = sum(1 for r in rows if r.get("ชื่อสินค้า"))
+    n_promos  = sum(1 for r in rows if r.get("ชื่อส่วนลด/โปรโม"))
+    print(f"\n📈 สรุป: {n_bills} บิล | {n_items} รายการสินค้า | {n_promos} รายการส่วนลด")
+
+
+# ─── Main Batch Loop ──────────────────────────────────────────────────────────
+def run_batch(input_dir: Path, output_dir: Path, batch_size: int = 100):
+    api_key = _get_gemini_key()
+    if not api_key:
+        print("❌ ไม่พบ GEMINI_API_KEY"); sys.exit(1)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # หาไฟล์รูปทั้งหมด
+    images = sorted([
+        f for f in input_dir.iterdir()
+        if f.suffix.lower() in SUPPORTED_EXT
+    ])
+
+    if not images:
+        print(f"❌ ไม่พบรูปใน {input_dir}")
+        print(f"   รองรับ: {', '.join(SUPPORTED_EXT)}")
+        sys.exit(1)
+
+    total = len(images)
+    print(f"🗂️  พบ {total} รูป ใน {input_dir}")
+    print(f"💾 บันทึก JSON ไปที่: {output_dir}")
+    print(f"⏱️  sleep {SLEEP_BETWEEN}s ระหว่าง request (rate-limit safe)")
+    print(f"🔄 retry สูงสุด {MAX_RETRY} ครั้ง/รูป")
+    print("─" * 60)
+
+    success = 0; skipped = 0; failed = 0
+    start_time = time.time()
+
+    for idx, img_path in enumerate(images, 1):
+        # Progress
+        print(f"\n[{idx:3d}/{total}] {img_path.name}")
+
+        # Process batch
+        ok = process_single_image(img_path, api_key, output_dir)
+
+        if ok:
+            # ตรวจว่าเพิ่งทำ หรือข้าม (มีแล้ว)
+            out_file = output_dir / f"{img_path.stem}.json"
+            if "ข้าม" in "":  # placeholder
+                skipped += 1
+            else:
+                success += 1
+        else:
+            failed += 1
+
+        # Rate limit delay (ยกเว้นรูปสุดท้าย)
+        if idx < total:
+            time.sleep(SLEEP_BETWEEN)
+
+        # Progress summary ทุก 10 รูป
+        if idx % 10 == 0 or idx == total:
+            elapsed  = time.time() - start_time
+            per_img  = elapsed / idx
+            remaining = per_img * (total - idx)
+            print(f"\n  📊 Progress: {idx}/{total} | "
+                  f"✅{success} ⏭️{skipped} ❌{failed} | "
+                  f"เวลา: {elapsed:.0f}s | "
+                  f"เหลือ ~{remaining:.0f}s")
+
+    elapsed = time.time() - start_time
+    print("\n" + "─" * 60)
+    print(f"🏁 เสร็จสิ้น: {total} รูป ใช้เวลา {elapsed:.1f}s ({elapsed/60:.1f} นาที)")
+    print(f"   ✅ สำเร็จ: {success} | ⏭️ ข้ามแล้ว: {skipped} | ❌ ล้มเหลว: {failed}")
+
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+def _batch_main():
+    parser = argparse.ArgumentParser(
+        description="CJ Express Batch OCR — ส่งรูปให้ Gemini Vision",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+ตัวอย่าง:
+  # วิเคราะห์รูปทั้งหมดใน ./receipts → JSON ใน ./results
+  python cj_batch_ocr.py --input ./receipts --output ./results
+
+  # รวม JSON เป็น Excel
+  python cj_batch_ocr.py --merge ./results --excel output.xlsx
+
+  # ทำทั้งหมดในคำสั่งเดียว
+  python cj_batch_ocr.py --input ./receipts --output ./results --excel output.xlsx
+
+  # กำหนด batch size (default=100)
+  python cj_batch_ocr.py --input ./receipts --output ./results --batch 40
+
+ตั้งค่า API Key:
+  export GEMINI_API_KEY="your-key-here"
+  หรือสร้างไฟล์ .env แล้วใส่: GEMINI_API_KEY=your-key-here
+        """
+    )
+    parser.add_argument("--input",  "-i", type=Path, help="โฟลเดอร์รูปใบเสร็จ")
+    parser.add_argument("--output", "-o", type=Path, help="โฟลเดอร์บันทึก JSON", default=Path("./json_results"))
+    parser.add_argument("--merge",  "-m", type=Path, help="โฟลเดอร์ JSON ที่จะ merge")
+    parser.add_argument("--excel",  "-e", type=Path, help="ไฟล์ Excel/CSV ที่จะบันทึก")
+    parser.add_argument("--batch",  "-b", type=int,  help="จำนวนรูปต่อ batch (default=100)", default=100)
+    parser.add_argument("--sleep",  "-s", type=float,help=f"วินาทีระหว่าง request (default={SLEEP_BETWEEN})", default=SLEEP_BETWEEN)
+
+    args = parser.parse_args()
+
+    global SLEEP_BETWEEN
+    SLEEP_BETWEEN = args.sleep
+
+    if not args.input and not args.merge:
+        parser.print_help()
+        sys.exit(0)
+
+    # Step 1: วิเคราะห์รูป
+    if args.input:
+        run_batch(args.input, args.output, args.batch)
+
+    # Step 2: merge → Excel
+    if args.merge or (args.input and args.excel):
+        merge_dir = args.merge or args.output
+        out_file  = args.excel or (merge_dir / "receipts_summary.xlsx")
+        merge_results(merge_dir, out_file)
+
+# ─── CLI ──────────────────────────────────────────────────────────────────────
+def _batch_main():
+    parser = argparse.ArgumentParser(
+        description="CJ Express Batch OCR — ส่งรูปให้ Gemini Vision",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+ตัวอย่าง:
+  # วิเคราะห์รูปทั้งหมดใน ./receipts → JSON ใน ./results
+  python cj_batch_ocr.py --input ./receipts --output ./results
+
+  # รวม JSON เป็น Excel
+  python cj_batch_ocr.py --merge ./results --excel output.xlsx
+
+  # ทำทั้งหมดในคำสั่งเดียว
+  python cj_batch_ocr.py --input ./receipts --output ./results --excel output.xlsx
+
+  # กำหนด batch size (default=100)
+  python cj_batch_ocr.py --input ./receipts --output ./results --batch 40
+
+ตั้งค่า API Key:
+  export GEMINI_API_KEY="your-key-here"
+  หรือสร้างไฟล์ .env แล้วใส่: GEMINI_API_KEY=your-key-here
+        """
+    )
+    parser.add_argument("--input",  "-i", type=Path, help="โฟลเดอร์รูปใบเสร็จ")
+    parser.add_argument("--output", "-o", type=Path, help="โฟลเดอร์บันทึก JSON", default=Path("./json_results"))
+    parser.add_argument("--merge",  "-m", type=Path, help="โฟลเดอร์ JSON ที่จะ merge")
+    parser.add_argument("--excel",  "-e", type=Path, help="ไฟล์ Excel/CSV ที่จะบันทึก")
+    parser.add_argument("--batch",  "-b", type=int,  help="จำนวนรูปต่อ batch (default=100)", default=100)
+    parser.add_argument("--sleep",  "-s", type=float,help=f"วินาทีระหว่าง request (default={SLEEP_BETWEEN})", default=SLEEP_BETWEEN)
+
+    args = parser.parse_args()
+
+    global SLEEP_BETWEEN
+    SLEEP_BETWEEN = args.sleep
+
+    if not args.input and not args.merge:
+        parser.print_help()
+        sys.exit(0)
+
+    # Step 1: วิเคราะห์รูป
+    if args.input:
+        run_batch(args.input, args.output, args.batch)
+
+    # Step 2: merge → Excel
+    if args.merge or (args.input and args.excel):
+        merge_dir = args.merge or args.output
+        out_file  = args.excel or (merge_dir / "receipts_summary.xlsx")
+        merge_results(merge_dir, out_file)
+
 if __name__ == "__main__":
-    main()
+    # ถ้ามี argument → รัน batch mode
+    # ถ้าไม่มี → รัน Streamlit app
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("--server"):
+        _batch_main()
+    else:
+        main()

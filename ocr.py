@@ -1815,7 +1815,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     if price_block_start and price_block_start > 0:
         _neg_price = re.compile(r'^-\s*[\d,.]+\s*[Vv]?\s*$')
         _DATE_RE3  = re.compile(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}')
-        _skip_hdr  = re.compile(r'BNO|8NO|TAX|VAT|POS|User|ID:|TAXID', re.IGNORECASE)
+        _skip_hdr  = re.compile(r'BNO|8NO|TAX|VAT|POS|User|ID:|TAXID|บอลราม|บอดราม|ยอดรวม|UORTIN|UORT', re.IGNORECASE)
 
         def _strip_note(s):
             return re.sub(
@@ -2033,7 +2033,7 @@ def extract_items_cj(text: str) -> list:
                 "www.","FB:","ร้องเรียน","สมัคร",  # ← เพิ่ม comma ตรงนี้
                 "เบอร์ร้าน","เบอร์โทร","MORE TAX","VAT INCLUDED",
                 "ใบกากับ","ใบกำกับ","ใบเสร็จรับ","บาท 100","บาท 62",   # ยอดชำระ patterns
-                "ID:E","ID-E"]
+                "ID:E", "บอลราม", "บอดราม", "บอลรวม","ID-E"]
 
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'
     _QTY    = r'(?:\d+|-)'

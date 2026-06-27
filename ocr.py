@@ -1881,8 +1881,8 @@ def _merge_gdrive_lines(lines: list) -> list:
                             combined += " " + nx
                             j += 1
                         
-        else:
-            break
+                    else:
+                        break
                 if price_count > 0:
                     merged.append(combined); i = j; continue
             # skip standalone note

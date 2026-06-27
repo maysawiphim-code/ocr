@@ -724,19 +724,18 @@ def is_gemini_configured() -> bool:
     return bool(_get_gemini_keys())
 
 def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
-    import requests as _req, time, random
+    import requests as _req, time
     keys = _get_gemini_keys()
     if not keys:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
 
-    # ── rotate: ใช้ counter ใน session state ──
     if "_gemini_key_idx" not in st.session_state:
         st.session_state["_gemini_key_idx"] = 0
 
     n = len(keys)
     start_idx = st.session_state["_gemini_key_idx"]
 
-    for attempt in range(n * 2):  # วนสูงสุด 2 รอบ
+    for attempt in range(n * 2):
         idx = (start_idx + attempt) % n
         key = keys[idx]
         try:
@@ -749,19 +748,26 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
                 timeout=30,
             )
             if resp.status_code == 429:
-                # key นี้ rate limit → ลอง key ถัดไปทันที
+                # rate limit → ลอง key ถัดไป
+                continue
+            if resp.status_code in (401, 403):
+                # key ผิด/หมดอายุ → ลอง key ถัดไป
+                continue
+            if resp.status_code >= 500:
+                # server error → ลอง key ถัดไป
+                time.sleep(2)
                 continue
             resp.raise_for_status()
             data = resp.json()
-            # บันทึก idx ถัดไปสำหรับ call หน้า (round-robin)
             st.session_state["_gemini_key_idx"] = (idx + 1) % n
             return data["candidates"][0]["content"]["parts"][0]["text"]
-        except _req.exceptions.HTTPError:
-            if resp.status_code == 429:
-                continue
-            raise
+        except _req.exceptions.Timeout:
+            # timeout → ลอง key ถัดไป
+            continue
+        except _req.exceptions.RequestException:
+            continue
 
-    raise RuntimeError(f"Gemini rate limit ทุก key ({n} keys) — รอสักครู่แล้วลองใหม่")
+    raise RuntimeError(f"Gemini ไม่ตอบสนอง ({n} keys) — รอสักครู่แล้วลองใหม่")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants

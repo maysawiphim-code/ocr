@@ -1880,8 +1880,8 @@ def _merge_gdrive_lines(lines: list) -> list:
                             items_merged.append(cur_name)
                     else:
                         items_merged.append(cur_name)
-                                cur_name = None; prices_buf = []
-                                break
+                cur_name = None; prices_buf = []
+                break
 
             clean_p = re.sub(r'\s*[Vv]\s*$', '', s).strip()
             is_neg  = bool(_neg_price.match(clean_p)) and bool(clean_p)

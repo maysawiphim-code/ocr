@@ -677,7 +677,6 @@ def run_ocr_google_vision(crop_cv) -> str:
     full_text = resp0.get("fullTextAnnotation", {}).get("text", "")
     return clean_text(full_text) if full_text else ""
 def run_ocr_gemini_vision(crop_cv) -> dict:
-    """ส่งรูปตรงให้ Gemini วิเคราะห์ทั้งหมด — ไม่ต้องผ่าน OCR แยก"""
     import requests as _req
     keys = _get_gemini_keys()
     if not keys:
@@ -689,32 +688,16 @@ def run_ocr_gemini_vision(crop_cv) -> dict:
     img_b64 = base64.b64encode(buf.tobytes()).decode()
 
     prompt = f"""วิเคราะห์ใบเสร็จ CJ Express จากรูปภาพนี้
-
 {BAO_CAFE_MENU}
-
 ตอบ JSON เท่านั้น:
-{{
-  "date": "วัน/เดือน/ปี",
-  "time": "HH:MM",
-  "pos_id": "4 หลักจาก BNO เช่น BNO.S26061416N03 → 1416",
-  "pos_machine": "NXX จาก BNO",
-  "rcpt_no": "BNO เต็ม",
-  "total_amount": 0.0,
-  "items": [{{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}}]
-}}
-
+{{"date":"","time":"","pos_id":"","pos_machine":"","rcpt_no":"","total_amount":0.0,
+  "items":[{{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}}]}}
 {CATEGORY_PROMPT}
-
-กฎสำคัญ:
-- 1B30, lB30, 1B20, Bao_, B80, Be0 → "Bao" เสมอ หมวด "Bao Cafe"
-- หวานน้อย/ไม่หวาน/ไปหวาน = note ไม่ใช่สินค้า
-- โปรโมชั่น/ส่วนลด → ราคาติดลบ หมวด "ส่วนลด/โปรโมชั่น"
-- pos_id จาก BNO: BNO.S26061416N03-004232 → "1416", pos_machine → "N03"
-- วันที่ > 2026 → แก้เป็น 2026
-- ถ้ามี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการ"""
+กฎ: 1B30/lB30/Bao_/B80 → "Bao" หมวด "Bao Cafe" | โปรโมชั่น/ส่วนลด → ราคาติดลบ"""
 
     n = len(keys)
     start_idx = st.session_state.get("_gemini_key_idx", 0)
+    last_error = ""
     for attempt in range(n * 2):
         idx = (start_idx + attempt) % n
         key = keys[idx]
@@ -730,15 +713,22 @@ def run_ocr_gemini_vision(crop_cv) -> dict:
                 },
                 timeout=40,
             )
-            if resp.status_code in (429, 401, 403): continue
-            if resp.status_code >= 500: continue
+            # ── แสดง error จริง ──
+            if resp.status_code == 429:
+                last_error = f"429 rate limit key {idx+1}"
+                continue
+            if resp.status_code in (401, 403):
+                last_error = f"{resp.status_code} unauthorized key {idx+1}: {resp.text[:100]}"
+                continue
+            if resp.status_code >= 500:
+                last_error = f"{resp.status_code} server error"
+                continue
             resp.raise_for_status()
             data = resp.json()
             st.session_state["_gemini_key_idx"] = (idx + 1) % n
             text = data["candidates"][0]["content"]["parts"][0]["text"]
             text = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
             parsed = json.loads(text)
-            # สร้าง bill และ items
             bill = {
                 "date": str(parsed.get("date", "ไม่พบ")),
                 "time": str(parsed.get("time", "ไม่พบ")),
@@ -762,9 +752,14 @@ def run_ocr_gemini_vision(crop_cv) -> dict:
                     "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
                 })
             return {"bill": bill, "items": items, "ok": True}
-        except Exception:
+        except _req.exceptions.Timeout:
+            last_error = f"Timeout key {idx+1}"
             continue
-    raise RuntimeError(f"Gemini Vision ไม่ตอบสนอง ({n} keys)")
+        except Exception as e:
+            last_error = f"Exception key {idx+1}: {str(e)[:100]}"
+            continue
+
+    raise RuntimeError(f"Gemini Vision ไม่ตอบสนอง ({n} keys) — last error: {last_error}")
 def run_ocr(crop_cv, engine: str = "tesseract"):
     if engine == "gemini_vision":
         try:

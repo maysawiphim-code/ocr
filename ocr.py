@@ -1873,13 +1873,13 @@ def _merge_gdrive_lines(lines: list) -> list:
                         price_count += 1
                         j += 1
                     elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
-                if _item_start.match(nx):
-                    merged.append(combined)
-                    combined = nx
-                    j += 1                    # ← เพิ่ม
-                else:
-                    combined += " " + nx
-                    j += 1
+                        if _item_start.match(nx):
+                            merged.append(combined)
+                            combined = nx
+                            j += 1                    # ← เพิ่ม
+                        else:
+                            combined += " " + nx
+                            j += 1
                         
         else:
             break

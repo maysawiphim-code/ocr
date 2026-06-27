@@ -704,36 +704,64 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 # ─────────────────────────────────────────────────────────────────────────────
 _GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
-def _get_gemini_key() -> str:
+def _get_gemini_keys() -> list:
+    """ดึง Gemini API keys ทั้งหมด (GEMINI_API_KEY, GEMINI_API_KEY_2, ... _11)"""
+    keys = []
     try:
-        return st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+        # key หลัก
+        k = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
+        if k.strip(): keys.append(k.strip())
+        # key เพิ่มเติม _2 ถึง _11
+        for i in range(2, 12):
+            k = st.secrets.get(f"GEMINI_API_KEY_{i}", os.environ.get(f"GEMINI_API_KEY_{i}", ""))
+            if k.strip(): keys.append(k.strip())
     except Exception:
-        return os.environ.get("GEMINI_API_KEY", "")
+        k = os.environ.get("GEMINI_API_KEY", "")
+        if k.strip(): keys.append(k.strip())
+    return keys
 
 def is_gemini_configured() -> bool:
-    return bool(_get_gemini_key().strip())
+    return bool(_get_gemini_keys())
 
 def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
-    import requests as _req, time
-    key = _get_gemini_key()
-    if not key:
+    import requests as _req, time, random
+    keys = _get_gemini_keys()
+    if not keys:
         raise RuntimeError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
-    for attempt in range(2):
-        resp = _req.post(
-            f"{_GEMINI_API_URL}?key={key}",
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
-            },
-            timeout=30,
-        )
-        if resp.status_code == 429:
-            time.sleep(5)
-            continue
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
-    raise RuntimeError("Gemini rate limit — รอสักครู่แล้วลองใหม่")
+
+    # ── rotate: ใช้ counter ใน session state ──
+    if "_gemini_key_idx" not in st.session_state:
+        st.session_state["_gemini_key_idx"] = 0
+
+    n = len(keys)
+    start_idx = st.session_state["_gemini_key_idx"]
+
+    for attempt in range(n * 2):  # วนสูงสุด 2 รอบ
+        idx = (start_idx + attempt) % n
+        key = keys[idx]
+        try:
+            resp = _req.post(
+                f"{_GEMINI_API_URL}?key={key}",
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.1},
+                },
+                timeout=30,
+            )
+            if resp.status_code == 429:
+                # key นี้ rate limit → ลอง key ถัดไปทันที
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            # บันทึก idx ถัดไปสำหรับ call หน้า (round-robin)
+            st.session_state["_gemini_key_idx"] = (idx + 1) % n
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        except _req.exceptions.HTTPError:
+            if resp.status_code == 429:
+                continue
+            raise
+
+    raise RuntimeError(f"Gemini rate limit ทุก key ({n} keys) — รอสักครู่แล้วลองใหม่")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants

@@ -1771,31 +1771,28 @@ def _merge_gdrive_lines(lines: list) -> list:
             _kw_am_sm = re.compile(
                 r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม',
                 re.IGNORECASE)
+            # ✅ แก้ — indent ให้ถูก
             if _kw_am_sm.search(s):
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
                 elif cur_name and not prices_buf:
-                    # FIX: look-ahead หาราคาหลัง keyword นี้
                     _lookahead_price = None
                     _cur_idx = lines.index(l) if l in lines else -1
-                if _cur_idx >= 0:
-                    for _j in range(_cur_idx + 1, min(_cur_idx + 15, len(lines))):  # ← เพิ่มจาก 8 เป็น 15
-                        _ls = lines[_j].strip()
-                        _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
-                    if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
-                        _lookahead_price = _lc
-                        break
-                        # FIX: ข้าม NOTE และ skip lines ได้ แต่ถ้าเจอ Thai text ใหม่ → หยุด
-                    if _has_thai.search(_ls) and not _skip_note.match(_ls) and not _kw_count.search(_ls):
-                        break
-                if _lookahead_price:
-                    items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
-                else:
-                    items_merged.append(cur_name)
+                    if _cur_idx >= 0:                      # ← indent เข้า 1 ระดับ
+                        for _j in range(_cur_idx + 1, min(_cur_idx + 15, len(lines))):
+                            _ls = lines[_j].strip()
+                            _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
+                            if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
+                                _lookahead_price = _lc
+                                break
+                            if _has_thai.search(_ls) and not _skip_note.match(_ls) and not _kw_count.search(_ls):
+                                break
+                    if _lookahead_price:                   # ← ระดับเดียวกับ if _cur_idx
+                        items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
+                    else:
+                        items_merged.append(cur_name)
                 cur_name = None; prices_buf = []
                 break
-            if _kw_count.search(s): continue
-            if _skip_note.match(s): continue
 
             clean_p = re.sub(r'\s*[Vv]\s*$', '', s).strip()
             is_neg  = bool(_neg_price.match(clean_p)) and bool(clean_p)
@@ -1876,12 +1873,14 @@ def _merge_gdrive_lines(lines: list) -> list:
                         price_count += 1
                         j += 1
                     elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
-                        if _item_start.match(nx):
-                            merged.append(combined)  # flush item แรก (จะหาราคาจาก block ถัดไป)
-                            combined = nx             # เริ่ม item ใหม่
-                        else:
-                            combined += " " + nx
-                            j += 1
+                if _item_start.match(nx):
+                    merged.append(combined)
+                    combined = nx
+                    j += 1                    # ← เพิ่ม
+                else:
+                    combined += " " + nx
+                    j += 1
+                        
                     else:
                         break
                 if price_count > 0:

@@ -676,15 +676,104 @@ def run_ocr_google_vision(crop_cv) -> str:
         raise RuntimeError(f"Google Vision API error: {resp0['error'].get('message', resp0['error'])}")
     full_text = resp0.get("fullTextAnnotation", {}).get("text", "")
     return clean_text(full_text) if full_text else ""
+def run_ocr_gemini_vision(crop_cv) -> dict:
+    """ส่งรูปตรงให้ Gemini วิเคราะห์ทั้งหมด — ไม่ต้องผ่าน OCR แยก"""
+    import requests as _req
+    keys = _get_gemini_keys()
+    if not keys:
+        raise RuntimeError("ไม่มี Gemini API key")
+    gray = whiten_background(crop_cv)
+    img_color = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    ok, buf = cv2.imencode(".jpg", img_color, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    if not ok: raise RuntimeError("แปลงภาพไม่สำเร็จ")
+    img_b64 = base64.b64encode(buf.tobytes()).decode()
 
-def run_ocr(crop_cv, engine: str = "tesseract"):
-    if engine == "gdrive":
+    prompt = f"""วิเคราะห์ใบเสร็จ CJ Express จากรูปภาพนี้
+
+{BAO_CAFE_MENU}
+
+ตอบ JSON เท่านั้น:
+{{
+  "date": "วัน/เดือน/ปี",
+  "time": "HH:MM",
+  "pos_id": "4 หลักจาก BNO เช่น BNO.S26061416N03 → 1416",
+  "pos_machine": "NXX จาก BNO",
+  "rcpt_no": "BNO เต็ม",
+  "total_amount": 0.0,
+  "items": [{{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}}]
+}}
+
+{CATEGORY_PROMPT}
+
+กฎสำคัญ:
+- 1B30, lB30, 1B20, Bao_, B80, Be0 → "Bao" เสมอ หมวด "Bao Cafe"
+- หวานน้อย/ไม่หวาน/ไปหวาน = note ไม่ใช่สินค้า
+- โปรโมชั่น/ส่วนลด → ราคาติดลบ หมวด "ส่วนลด/โปรโมชั่น"
+- pos_id จาก BNO: BNO.S26061416N03-004232 → "1416", pos_machine → "N03"
+- วันที่ > 2026 → แก้เป็น 2026
+- ถ้ามี "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N รายการ"""
+
+    n = len(keys)
+    start_idx = st.session_state.get("_gemini_key_idx", 0)
+    for attempt in range(n * 2):
+        idx = (start_idx + attempt) % n
+        key = keys[idx]
         try:
-            text = run_ocr_google_drive(crop_cv)
-            if text:
-                return text
+            resp = _req.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}",
+                json={
+                    "contents": [{"parts": [
+                        {"inline_data": {"mime_type": "image/jpeg", "data": img_b64}},
+                        {"text": prompt}
+                    ]}],
+                    "generationConfig": {"maxOutputTokens": 2000, "temperature": 0.1}
+                },
+                timeout=40,
+            )
+            if resp.status_code in (429, 401, 403): continue
+            if resp.status_code >= 500: continue
+            resp.raise_for_status()
+            data = resp.json()
+            st.session_state["_gemini_key_idx"] = (idx + 1) % n
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            text = re.sub(r"```(?:json)?\s*|\s*```", "", text).strip()
+            parsed = json.loads(text)
+            # สร้าง bill และ items
+            bill = {
+                "date": str(parsed.get("date", "ไม่พบ")),
+                "time": str(parsed.get("time", "ไม่พบ")),
+                "branch": "ไม่พบ",
+                "pos_id": str(parsed.get("pos_id", "ไม่พบ")),
+                "pos_machine": str(parsed.get("pos_machine", "ไม่พบ")),
+                "rcpt_no": str(parsed.get("rcpt_no", "ไม่พบ")),
+                "total_amount": float(parsed.get("total_amount", 0)),
+                "cash": 0.0, "change": 0.0,
+                "tax_id": "ไม่พบ", "user": "ไม่พบ", "name": "ไม่พบ",
+            }
+            items = []
+            for it in parsed.get("items", []):
+                nm = str(it.get("ชื่อสินค้า", ""))
+                cat = BAO_CAFE_CATEGORY if _is_bao_item(nm) else str(it.get("หมวดหมู่", ""))
+                if not cat: cat = _categorize_by_rule(nm)
+                items.append({
+                    "ชื่อสินค้า": nm, "หมวดหมู่": cat,
+                    "จำนวน": int(it.get("จำนวน", 1)),
+                    "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
+                    "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
+                })
+            return {"bill": bill, "items": items, "ok": True}
+        except Exception:
+            continue
+    raise RuntimeError(f"Gemini Vision ไม่ตอบสนอง ({n} keys)")
+def run_ocr(crop_cv, engine: str = "tesseract"):
+    if engine == "gemini_vision":
+        try:
+            result = run_ocr_gemini_vision(crop_cv)
+            # เก็บผลไว้ใน session state เพื่อให้ flow หลักดึงไปใช้
+            st.session_state["_gemini_vision_result"] = result
+            return f"[Gemini Vision OK — {len(result.get('items',[]))} items]"
         except Exception as e:
-            st.session_state.setdefault("_gdrive_warning", str(e))
+            st.session_state.setdefault("_gemini_vision_warning", str(e))
     if engine == "vision":
         try:
             text = run_ocr_google_vision(crop_cv)
@@ -774,15 +863,13 @@ def _call_gemini(prompt: str, max_tokens: int = 1500) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 BAO_CAFE_CATEGORY = "Bao Cafe"
 
-CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 8 หมวดนี้เท่านั้น):
-1. Bao Cafe — Bao ลาเต้, Bao อเมริกาโน่, Bao เอสเปรสโซ่, Bao โคโค่ ฯลฯ
-2. อาหารพร้อมทานและเบเกอรี่ — ข้าวกล่อง แซนด์วิช มาม่า ขนมปัง เค้ก ยูโรเค้ก
-3. ขนมและของขบเคี้ยว — ลูกอม ช็อกโกแลต มันฝรั่ง ถั่ว เยลลี่ สแน็ค
-4. เครื่องดื่ม — น้ำดื่ม น้ำอัดลม ชา กาแฟ นม ไมโล คาราบาว
-5. ของใช้ส่วนตัว — สบู่ แชมพู ยาสีฟัน โลชั่น ผ้าอนามัย
-6. ของใช้ในบ้าน — ผงซักฟอก น้ำยาล้างจาน กระดาษทิชชู ถุงขยะ
-7. เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ — ยา พลาสเตอร์ หน้ากาก วิตามิน
-8. สินค้าเบ็ดเตล็ดอื่นๆ — ถ่านไฟฉาย ปากกา บุหรี่ บัตรเติมเงิน
+CATEGORY_PROMPT = """หมวดหมู่ที่ใช้ได้ (เลือกได้เฉพาะ 6 หมวดนี้เท่านั้น):
+1. Fresh Food — ขนมปัง แซนด์วิช เบอร์เกอร์ สลัด อาหารแช่เย็น นมพาสเจอร์ไรส์ ไส้กรอกสด อาหารอุ่น เบเกอรี่สด
+2. Non Food — บุหรี่ หนังสือ ของใช้ส่วนตัว ของใช้ในบ้าน เครื่องเขียน อุปกรณ์ IT เครื่องใช้ไฟฟ้า ทิชชู ผงซักฟอก
+3. Packaged Beverage — น้ำดื่ม น้ำอัดลม นม UHT เบียร์ สุรา เครื่องดื่มชูกำลัง ไอศกรีม น้ำแข็ง
+4. Processed Food — บะหมี่สำเร็จรูป มาม่า อาหารกระป๋อง ขนม สแน็ค ลูกอม ช็อกโกแลต มันฝรั่ง
+5. Special Business — ยา วิตามิน สุขภาพ ผัก บริการ 7-Eleven wellness
+6. Bao Cafe — Bao ลาเต้ อเมริกาโน่ เอสเปรสโซ่ โกโก้ ชาเขียว ชาไทย
 หมวดพิเศษ: ส่วนลด/โปรโมชั่น — สำหรับส่วนลดและโปรโมชั่นเท่านั้น"""
 
 BAO_CAFE_MENU = """เมนู Bao Cafe: ลาเต้ | อเมริกาโน่ | เอสเปรสโซ่ | คาปูชิโน่ | โกโก้ | ชาเขียว | ชาไทย (ร้อน/เย็น)
@@ -816,30 +903,51 @@ def _is_bao_item(name: str) -> bool:
 def _categorize_by_rule(name: str) -> str:
     if _is_bao_item(name):
         return BAO_CAFE_CATEGORY
-    # ── FIX: โปรโมชั่นและส่วนลด ──
     if re.search(r'ส่วนลด|โปรโมชั่น|โปรโม|discount|promotion|แถม', name, re.IGNORECASE):
         return "ส่วนลด/โปรโมชั่น"
     n = name.lower()
-    if re.search(r'มาม่า|ไวไว|ยำยำ|บะหมี่|ข้าว|แซนด์|ขนมปัง|เค้ก|ยูโร|ไส้กรอก|'
-                 r'หมูแผ่น|เนื้อแผ่น|สลัด|โจ๊ก|ซาลาเปา|euro|bakery|bread', n):
-        return "อาหารพร้อมทานและเบเกอรี่"
-    if re.search(r'เฮอร์ช|ช็อก|chocolate|โอโช|ข้าวอบ|มันฝรั่ง|ป๊อปคอร์|ถั่ว|เยลลี่|'
-                 r'ลูกอม|หมากฝรั่ง|สแน็ค|snack|คุกกี้|เวเฟอร์|เลย์|pringle|popcorn|candy', n):
-        return "ขนมและของขบเคี้ยว"
-    if re.search(r'น้ำ|นม|ชา|กาแฟ|coffee|tea|milk|โค้ก|coke|cola|เป๊ปซี่|pepsi|'
+    # Fresh Food
+    if re.search(r'ขนมปัง|แซนด์วิช|เบอร์เกอร์|ฮอทด็อก|สลัด|ข้าวกล่อง|ไส้กรอก|'
+                 r'หมูแผ่น|เนื้อแผ่น|โจ๊ก|ซาลาเปา|ยูโรเค้ก|euro|bakery|bread|'
+                 r'นมพาสเจอร์|นมสด|อาหารอุ่น|อาหารแช่|อาหารแช่แข็ง|เบเกอรี่สด|'
+                 r'ผลไม้สด|meal box|sandwich|burger|salad|chilled|frozen|'
+                 r'pasteurized|sausage|retort|warmed|appetizer|toasted', n):
+        return "Fresh Food"
+    # Packaged Beverage
+    if re.search(r'น้ำดื่ม|น้ำแร่|น้ำอัดลม|โค้ก|coke|cola|เป๊ปซี่|pepsi|'
                  r'สไปรท์|sprite|แฟนต้า|คาราบาว|กระทิง|ไมโล|milo|อราวน์|โออิชิ|'
-                 r'เกลือแร่|gatorade|เครื่องดื่ม|drink|juice|น้ำผล|น้ำส้ม', n):
-        return "เครื่องดื่ม"
+                 r'เกลือแร่|gatorade|เครื่องดื่ม|drink|juice|น้ำผล|น้ำส้ม|'
+                 r'นม uht|นมกล่อง|นมถุง|milk|uht|'
+                 r'เบียร์|beer|สุรา|wine|alcohol|whisky|'
+                 r'ไอศกรีม|ไอติม|ice cream|น้ำแข็ง|'
+                 r'energy drink|sport drink|beverage|soft drink|carbonated', n):
+        return "Packaged Beverage"
+    # Processed Food
+    if re.search(r'มาม่า|ไวไว|ยำยำ|บะหมี่|instant|noodle|'
+                 r'อาหารกระป๋อง|กระป๋อง|canned|'
+                 r'เฮอร์ช|ช็อก|chocolate|โอโช|ข้าวอบ|'
+                 r'มันฝรั่ง|ป๊อปคอร์น|ถั่ว|เยลลี่|ลูกอม|หมากฝรั่ง|'
+                 r'สแน็ค|snack|candy|confectionery|คุกกี้|เวเฟอร์|'
+                 r'เลย์|pringle|popcorn|ขนม|ของขบเคี้ยว|packaged food', n):
+        return "Processed Food"
+    # Special Business
+    if re.search(r'ยา|พลาสเตอร์|แอลกอฮอล์|หน้ากาก|mask|วิตามิน|vitamin|'
+                 r'อาหารเสริม|supplement|ถุงยาง|ผ้าพันแผล|paracetamol|'
+                 r'สุขภาพ|health|wellness|drug|healthcare|medicine|herbal|'
+                 r'ผัก|vegetable|bellinee|kudsan|'
+                 r'7 service|social welfare|supply', n):
+        return "Special Business"
+    # Non Food
     if re.search(r'สบู่|แชมพู|shampoo|ยาสีฟัน|แปรงสีฟัน|ครีมอาบ|โลชั่น|lotion|'
-                 r'ผ้าอนามัย|ดีโอ|โรลออน|แป้ง|คอนแทค|ผ้าเช็ด|สกิน|skin|ครีม|serum', n):
-        return "ของใช้ส่วนตัว"
-    if re.search(r'ทิชชู|tissue|ผงซักฟอก|น้ำยาซัก|น้ำยาปรับ|น้ำยาล้าง|'
-                 r'ถุงขยะ|ถุงพลาสติก|ฟิล์มห่อ|cellox|comfort|downy|sunlight|vim|น้ำยา', n):
-        return "ของใช้ในบ้าน"
-    if re.search(r'ยา|พลาสเตอร์|แอลกอฮอล์|alcohol|หน้ากาก|mask|วิตามิน|vitamin|'
-                 r'อาหารเสริม|supplement|ถุงยาง|ผ้าพันแผล|paracetamol|ibuprofen', n):
-        return "เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ"
-    return "สินค้าเบ็ดเตล็ดอื่นๆ"
+                 r'ผ้าอนามัย|ดีโอ|โรลออน|แป้ง|สกิน|skin|ครีม|serum|personal care|'
+                 r'ทิชชู|tissue|ผงซักฟอก|น้ำยา|ถุงขยะ|cellox|household|houseware|'
+                 r'บุหรี่|cigarette|ยาสูบ|'
+                 r'หนังสือ|นิตยสาร|หนังสือพิมพ์|book|magazine|newspaper|'
+                 r'ปากกา|ดินสอ|สมุด|กระดาษ|stationery|'
+                 r'electronic|เครื่องใช้ไฟฟ้า|appliance|it device|'
+                 r'ถ่านไฟฉาย|battery|ไฟแช็ก|lighter|entertainment|sanitary', n):
+        return "Non Food"
+    return "Processed Food"
 
 def categorize_items_batch(items: list) -> list:
     if not items:
@@ -2699,12 +2807,14 @@ def main():
 
         gdrive_ready = is_gdrive_configured()
         vision_ready = is_vision_api_configured()
+        gemini_ready = is_gemini_configured()
         engine_options = [
             "🆓 Tesseract (ฟรี, รันในเครื่อง)",
             f"📄 Google Drive OCR {'✅' if is_gdrive_token_ready() else ('🔑 ต้อง Login' if gdrive_ready else '⚙️ ต้องตั้งค่า')} (ฟรี ไม่จำกัด)",
             f"🎯 Google Cloud Vision API {'✅' if vision_ready else '⚙️ ต้องตั้งค่า'} (แม่นสุด)",
+            f"✨ Gemini Vision {'✅' if gemini_ready else '⚙️ ต้องตั้งค่า Key'} (ฟรี ไม่ต้อง Login แนะนำ)",
         ]
-        engine_map = ["tesseract", "gdrive", "vision"]
+        engine_map = ["tesseract", "gdrive", "vision", "gemini_vision"]
         current_idx = engine_map.index(S.ocr_engine) if S.ocr_engine in engine_map else 0
         choice = st.radio("เลือก OCR Engine", engine_options, index=current_idx,
                           key="ocr_engine_radio", label_visibility="collapsed")
@@ -2718,23 +2828,29 @@ def main():
                 st.success("✅ ตั้งค่า Google Vision API key แล้ว")
             else:
                 st.warning("⚠️ ยังไม่ได้ตั้งค่า GOOGLE_VISION_API_KEY")
+        elif S.ocr_engine == "gemini_vision":
+            if gemini_ready:
+                st.success("✅ Gemini Vision พร้อมใช้งาน — ส่งรูปตรงให้ Gemini วิเคราะห์ทั้งหมด ไม่ต้อง Login")
+            else:
+                st.warning("⚠️ ยังไม่ได้ตั้งค่า GEMINI_API_KEY — เพิ่มใน secrets.toml")
         else:
             st.caption("💡 Tesseract ฟรีและรันในเครื่องทั้งหมด แต่แม่นน้อยกว่า")
 
-        gemini_ready = is_gemini_configured()
         st.divider()
-        st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text**")
-        if gemini_ready:
-            st.success("✅ ตั้งค่า Gemini API key แล้ว — ฟรี 1,500 requests/วัน")
-        else:
-            st.info("💡 เพิ่ม GEMINI_API_KEY ใน `.streamlit/secrets.toml` เพื่อแม่นขึ้น")
+        if S.ocr_engine != "gemini_vision":
+            st.markdown("**✨ Gemini API — วิเคราะห์ข้อมูลจาก raw text**")
+            if gemini_ready:
+                st.success("✅ ตั้งค่า Gemini API key แล้ว — ฟรี 1,500 requests/วัน")
+            else:
+                st.info("💡 เพิ่ม GEMINI_API_KEY ใน `.streamlit/secrets.toml` เพื่อแม่นขึ้น")
 
         with st.expander("📊 เปรียบเทียบ OCR Engine"):
             st.markdown("""| Engine | ค่าใช้จ่าย | ความแม่น | ภาษาไทย | Speed |
 |--------|-----------|---------|---------|-------|
 | 🆓 Tesseract | ฟรี | ⭐⭐ | พอใช้ | ⚡⚡⚡ |
-| 📄 **Drive OCR + Gemini** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | **ดีมาก** | ⚡⚡ |
-| 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ดีมาก | ⚡⚡ |""")
+| 📄 Drive OCR + Gemini | ฟรี ไม่จำกัด | ⭐⭐⭐⭐ | ดีมาก | ⚡⚡ |
+| 🎯 Google Vision API | ฟรี 1K/เดือน | ⭐⭐⭐⭐⭐ | ดีมาก | ⚡⚡ |
+| ✨ **Gemini Vision** | **ฟรี ไม่จำกัด** | **⭐⭐⭐⭐⭐** | **ดีที่สุด** | ⚡⚡ |""")
 
     st.markdown(f'<p class="sec-header">{t("mode_label")}</p>', unsafe_allow_html=True)
     m1, m2 = st.columns(2)
@@ -2870,45 +2986,62 @@ def main():
         st.caption(f"Engine: **{engine_label}**")
 
         if st.button(t("analyze"), use_container_width=True, type="primary"):
-                with st.spinner("กำลัง OCR..."):
-                    img_cv = pil_to_cv(working_pil)
-                    all_bills = []
-                    fname = (S.gallery_files[S.selected_idx][0]
-                             if 0 <= S.selected_idx < len(S.gallery_files) else "image")
-                    progress = st.progress(0, text="เริ่มต้น OCR...")
+            with st.spinner("กำลัง OCR..."):
+                img_cv = pil_to_cv(working_pil)
+                all_bills = []
+                fname = (S.gallery_files[S.selected_idx][0]
+                         if 0 <= S.selected_idx < len(S.gallery_files) else "image")
+                progress = st.progress(0, text="เริ่มต้น OCR...")
+                crops = [img_cv]
 
-                    # 1 บิลต่อรูปเสมอ
-                    crops = [img_cv]
+                for ci, crop in enumerate(crops):
+                    label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
+                    progress.progress((ci) / len(crops), text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
 
-                    for ci, crop in enumerate(crops):
-                        label = fname if len(crops)==1 else f"{fname} — บิล {ci+1}"
-                        progress.progress((ci) / len(crops),
-                            text=f"🔍 OCR บิล {ci+1}/{len(crops)}...")
-                        st.session_state["_gdrive_raw_texts"] = []
-                        text       = run_ocr(crop, engine=S.ocr_engine)
-                        gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
-                        text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
-                        if is_gemini_configured() and text_for_gemini.strip():
-                            progress.progress((ci + 0.5) / len(crops),
-                                text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
-                            gemini_result = extract_with_gemini(
-                                text_for_gemini,
-                                ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract")
-                            if gemini_result["ok"] and gemini_result["items"]:
-                                bill  = gemini_result["bill"]
-                                items = gemini_result["items"]
-                            else:
-                                bill  = extract_receipt(text)
-                                items = extract_items_cj(text)
+                    # ── Gemini Vision — ส่งรูปตรง ──
+                    if S.ocr_engine == "gemini_vision":
+                        progress.progress((ci + 0.3) / len(crops), text=f"✨ Gemini Vision วิเคราะห์...")
+                        try:
+                            gv = run_ocr_gemini_vision(crop)
+                            bill  = gv["bill"]
+                            items = gv["items"]
+                            text  = f"[Gemini Vision — {len(items)} items]"
+                        except Exception as e:
+                            st.warning(f"Gemini Vision error: {e} — fallback Tesseract")
+                            text  = run_ocr(crop, engine="tesseract")
+                            bill  = extract_receipt(text)
+                            items = extract_items_cj(text)
+                        all_bills.append({"filename": label, "bill": bill, "items": items,
+                                          "raw_text": text, "gdrive_raw": "",
+                                          "image": img_to_bytes_png(crop)})
+                        continue
+
+                    # ── engines อื่น ──
+                    st.session_state["_gdrive_raw_texts"] = []
+                    text       = run_ocr(crop, engine=S.ocr_engine)
+                    gdrive_raw = (st.session_state.get("_gdrive_raw_texts") or [""])[0]
+                    text_for_gemini = gdrive_raw if (S.ocr_engine == "gdrive" and gdrive_raw) else text
+                    if is_gemini_configured() and text_for_gemini.strip():
+                        progress.progress((ci + 0.5) / len(crops),
+                            text=f"✨ Gemini วิเคราะห์บิล {ci+1}/{len(crops)}...")
+                        gemini_result = extract_with_gemini(
+                            text_for_gemini,
+                            ocr_source="gdrive" if S.ocr_engine == "gdrive" else "tesseract")
+                        if gemini_result["ok"] and gemini_result["items"]:
+                            bill  = gemini_result["bill"]
+                            items = gemini_result["items"]
                         else:
                             bill  = extract_receipt(text)
                             items = extract_items_cj(text)
-                        all_bills.append({"filename":label,"bill":bill,"items":items,
-                                          "raw_text":text,"gdrive_raw":gdrive_raw,
-                                          "image":img_to_bytes_png(crop)})
-                    progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
+                    else:
+                        bill  = extract_receipt(text)
+                        items = extract_items_cj(text)
+                    all_bills.append({"filename": label, "bill": bill, "items": items,
+                                      "raw_text": text, "gdrive_raw": gdrive_raw,
+                                      "image": img_to_bytes_png(crop)})
 
-                    S.all_bills = all_bills; S.step=3; st.rerun()
+                progress.progress(1.0, text=f"✅ OCR เสร็จสิ้น {len(crops)} บิล")
+                S.all_bills = all_bills; S.step=3; st.rerun()
 
     if S.all_bills:
         _render_bills_ui(S.all_bills, key_prefix="s")

@@ -1840,6 +1840,8 @@ def _merge_gdrive_lines(lines: list) -> list:
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
                 elif cur_name and not prices_buf:
+                    pending = [x for x in items_merged if not re.search(r'\d+[.,]\d{2}', x)]
+                    pending_count = len(pending) + 1  # +1 สำหรับ cur_name
                     _lookahead_price = None
                     _cur_idx = lines.index(l) if l in lines else -1
                     if _cur_idx >= 0:
@@ -1852,19 +1854,30 @@ def _merge_gdrive_lines(lines: list) -> list:
                             if re.search(r'[ก-๙]', _lc) and not _price_only.match(_lc):
                                 if re.match(r'^\d+\s+[ก-๙A-Za-z].{2,}', _lc):
                                     break
-                                elif re.search(r'รหัส|แคม|แสน|นนทม|CR\s|LW$|บท$|บล่ม|บ\./น', _lc):
+                                elif re.(r'รหัส|แคม|แสน|นนทม|CR\s|LW$|บท$|บล่ม|บ\./น|User|BNO|POS', _lc, re.IGNORECASE):
                                     continue
                                 elif len(re.sub(r'\s+', '', _lc)) <= 15:
                                     continue
                                 else:
                                     break
                             if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
+                                if not _lookahead_prices or _lc != _lookahead_prices[-1]:
                                 _lookahead_price = _lc
-                                break
+                                if len(_lookahead_prices) >= pending_count:
+                                    break
                             if _has_thai.search(_ls) and not _skip_note.match(_ls) and not _kw_count.search(_ls):
                                 break
                     if _lookahead_price:
-                        items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
+                        price_idx = 0
+                        for mi, mitem in enumerate(items_merged):
+                            if not re.search(r'\d+[.,]\d{2}', mitem) and price_idx < len(_lookahead_prices):
+                                items_merged[mi] = f"{mitem} {_lookahead_prices[price_idx]} {_lookahead_prices[price_idx]}"
+                                price_idx += 1
+                        # cur_name
+                        if price_idx < len(_lookahead_prices):
+                            items_merged.append(f"{cur_name} {_lookahead_prices[price_idx]} {_lookahead_prices[price_idx]}")
+                        else:
+                            items_merged.append(cur_name)
                     else:
                         items_merged.append(cur_name)
                 cur_name = None; prices_buf = []

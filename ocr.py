@@ -1419,7 +1419,7 @@ def universal_item_parser(text: str) -> list:
     """
     _RE_PRICE = re.compile(
         r'(\d{1,6}[.,]\d{2})'           # 12.00 / 12,00
-        r'|\b(\d{1,5})\s+(\d{2})\b'  # 12 00
+        r'|\d+\s*(?:[gG](?:m[lL]?)?|m[lL])\b'  # 12 00
     )
     _RE_NEG   = re.compile(r'^-\s*(\d+[.,]\d{2})\s*[Vv]?\s*$')
     _RE_DATE  = re.compile(r'^\s*\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\s*(\d{2}:\d{2})?\s*$')
@@ -1772,24 +1772,26 @@ def _merge_gdrive_lines(lines: list) -> list:
                 r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม',
                 re.IGNORECASE)
             if _kw_am_sm.search(s):
-                # flush สินค้าที่ค้างอยู่ก่อน break
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
-                elif cur_name:
-                    # ราคาอาจอยู่หลัง break line → look-ahead
+                elif cur_name and not prices_buf:
+                    # FIX: look-ahead หาราคาหลัง keyword นี้
                     _lookahead_price = None
                     _cur_idx = lines.index(l) if l in lines else -1
-                    if _cur_idx >= 0:
-                        for _j in range(_cur_idx + 1, min(_cur_idx + 8, len(lines))):
-                            _ls = lines[_j].strip()
-                            _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
-                            if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
-                                _lookahead_price = _lc
-                                break
-                    if _lookahead_price:
-                        items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
-                    else:
-                        items_merged.append(cur_name)
+                if _cur_idx >= 0:
+                    for _j in range(_cur_idx + 1, min(_cur_idx + 15, len(lines))):  # ← เพิ่มจาก 8 เป็น 15
+                        _ls = lines[_j].strip()
+                        _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
+                    if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
+                        _lookahead_price = _lc
+                        break
+                        # FIX: ข้าม NOTE และ skip lines ได้ แต่ถ้าเจอ Thai text ใหม่ → หยุด
+                    if _has_thai.search(_ls) and not _skip_note.match(_ls) and not _kw_count.search(_ls):
+                        break
+                if _lookahead_price:
+                    items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
+                else:
+                    items_merged.append(cur_name)
                 cur_name = None; prices_buf = []
                 break
             if _kw_count.search(s): continue
@@ -1874,8 +1876,12 @@ def _merge_gdrive_lines(lines: list) -> list:
                         price_count += 1
                         j += 1
                     elif price_count == 0 and _has_thai.search(nx) and not _kw_amount.search(nx):
-                        combined += " " + nx
-                        j += 1
+                        if _item_start.match(nx):
+                            merged.append(combined)  # flush item แรก (จะหาราคาจาก block ถัดไป)
+                            combined = nx             # เริ่ม item ใหม่
+                        else:
+                            combined += " " + nx
+                            j += 1
                     else:
                         break
                 if price_count > 0:
@@ -1949,7 +1955,7 @@ def extract_items_cj(text: str) -> list:
             ).strip()
             compact = _collapse(line)
 
-            if re.search(r'จ[าำ]?นวนสินค[้า]?[่า]?\s*รวม', line): break  # จำนวนสินค้ารวม
+            if re.search(r'จ[าำ]?นวนสินค[้า]?[่า]?\s*รวม', line): continue  # จำนวนสินค้ารวม
             if re.search(r'จ.{0,3}นวนสินค.{0,3}รวม', compact): break
             if re.search(r'สา[นม]านสินค|สานานสินค', compact): break
             if re.search(r'[รง]\s*[ก-๙]{0,2}\s*ย\s*ก\s*า\s*ร', line): break
@@ -2010,14 +2016,16 @@ def extract_items_cj(text: str) -> list:
                     items.append(_make_item(nm, 1, parse_price(up), parse_price(tp)))
                 continue
 
-            m = _fb_b.match(lf)
+            m = _fb_b.match(lf)  # "1 คูลคูล 12.00"
             if m:
                 qty_raw, nm, price = m.groups()
                 qty = 1 if qty_raw == '-' else int(qty_raw)
                 nm = _clean_item_name(nm)
+                # ลบ suffix "จํานวนสินค้ารวม..." ออกจาก nm ก่อน
+                nm = re.sub(r'\s*จ[าำํ]?นวนสินค[้า]?.*$', '', nm, flags=re.IGNORECASE).strip()
                 if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                     p = parse_price(price)
-                    items.append(_make_item(nm, qty, p, round(p * qty, 2)))
+                    items.append(_make_item(nm, qty, p, round(p * qty, 2)))  # ✅ flush ทันที
                 continue
 
             m = _fb_c.match(lf)

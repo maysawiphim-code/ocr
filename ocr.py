@@ -1871,7 +1871,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                         price_idx = 0
                         for mi, mitem in enumerate(items_merged):
                             if not re.search(r'\d+[.,]\d{2}', mitem) and price_idx < len(_lookahead_prices):
-                                    items_merged[mi] = f"{mitem} {_lookahead_prices[price_idx]} {_lookahead_prices[price_idx]}"
+                                items_merged[mi] = f"{mitem} {_lookahead_prices[price_idx]} {_lookahead_prices[price_idx]}"
                                 price_idx += 1
                         # cur_name
                         if price_idx < len(_lookahead_prices):

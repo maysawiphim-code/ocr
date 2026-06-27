@@ -947,6 +947,14 @@ def extract_items_with_gemini(raw_text: str) -> list:
     return result.get("items", [])
 
 def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
+     # ── ดึงจำนวนสินค้ารวมจาก raw text ──
+    _n_items_match = re.search(
+        r'จ[าำ]?นวนสินค[้า]?\s*รวม\s*(\d+)\s*รายการ',
+        raw_text, re.IGNORECASE)
+    n_items_hint = ""
+    if _n_items_match:
+        n = _n_items_match.group(1)
+        n_items_hint = f"\n⚠️ บิลนี้มีสินค้า {n} รายการ — ต้องได้ items ครบ {n} ชิ้น ไม่นับโปรโมชั่น/ส่วนลด"
     if ocr_source == "gdrive":
         format_hint = """คุณคือผู้เชี่ยวชาญวิเคราะห์ใบเสร็จ CJ Express
 ข้อความนี้มาจาก OCR ลำดับบรรทัดอาจสลับ ราคาอาจอยู่ไม่ติดชื่อสินค้า
@@ -960,6 +968,10 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - ถ้ามี N สินค้า ราคา N ตัวถัดมาเรียงตามลำดับ (แม้มี User/BNO คั่น)
 - "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N ชิ้น (ไม่นับโปรโมชั่น)
 - "1,285.00" หรือ "1,196.00" บรรทัดเดียว = ยอดรวมสินค้า ไม่ใช่ item
+- บิลที่มี "จำนวนสินค้ารวม N รายการ" ต้องได้ items ครบ N ชิ้น ถ้าได้ไม่ครบให้ตรวจ raw text อีกครั้ง
+- ราคา 2 ตัวในบรรทัดเดียวเช่น "35.00 89.00" → ราคา item 1 และ item 2 ตามลำดับ
+- ราคาที่อยู่ก่อน item name → เป็นราคาของ item ถัดมา
+- โปรโมชั่นราคาบวก เช่น 48.00 หลังโปรโมชั่น → ต้องแปลงเป็น -48.00
 
 ห้ามนำสิ่งเหล่านี้มาเป็นชื่อสินค้า (เด็ดขาด):
 - ชื่อสาขา, เบอร์โทรศัพท์ (0xx-xxxxxxx), TAX ID, MORE TAX, VAT INCLUDED
@@ -970,6 +982,8 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - บาว คาเฟ คิวที่..., ร้องเรียน, ขอบคุณ, ลูกค้าสามารถ
 - "จำนวนสินค้ารวม N รายการ XX.00" → ยอดรวม ไม่ใช่สินค้า
 - ชื่อร้าน/สาขา เช่น "เจ มอสสาขาที่01351..." หรือ "ซีเจ มอร์สาขา..." → ข้ามไป ไม่ใช่สินค้า
+- ชื่อสาขา เช่น "เจ มอสสาขาที่01351 เขื่อนขนตาน..." → ข้ามไป ไม่ใช่สินค้า
+- ข้อความที่มีชื่อจังหวัด/อำเภอ เช่น ปราการชล, นครนายก, องครักษ์ → header ข้ามไป
 
 กรองตัวอักษรขยะ (noise) ออก:
 - ชื่อสินค้าต้องมีตัวอักษรไทยหรืออังกฤษที่อ่านออก ความยาว >= 3 ตัว
@@ -1041,9 +1055,7 @@ OCR แก้ชื่อผิด:
 ข้อมูลบิล:
 - pos_id จาก BNO: "BNO:S26061745N04-xxx" → pos_id="1745", pos_machine="N04"
 - วันที่ > 2026 → แก้เป็น 2026"""
-
-    prompt = f"""ใบเสร็จ CJ Express:
-
+    prompt = f"""ใบเสร็จ CJ Express:{n_items_hint}
 {raw_text}
 
 {format_hint}
@@ -1075,6 +1087,10 @@ OCR แก้ชื่อผิด:
 - "3 โปรโมชั่น2ชิ้น35บ TAO KAE NOI" + "-15.00" → item "โปรโมชั่น 2ชิ้น35บ TAO KAE NOI" ราคา -15.0
 - "+1 วิปปิ้งครีม 15.00 15.00" → สินค้าเสริม ราคา 15.0 หมวด "Bao Cafe"
 - ชื่อสินค้าที่ขึ้นต้นด้วย "+" คือ add-on เครื่องดื่ม Bao → หมวด "Bao Cafe"
+- ถ้า raw text ระบุ "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N ชิ้น (ไม่นับโปรโมชั่น/ส่วนลด)
+- ถ้าได้ items ไม่ครบ → ตรวจ raw text อีกครั้ง หา items ที่อาจอยู่ในบรรทัดเดียวกัน
+- ราคาที่อยู่ก่อน item name → เป็นราคาของ item ถัดมา
+- ราคา 2 ตัวในบรรทัดเดียว เช่น "35.00 89.00" → ราคา item 1 และ item 2 ตามลำดับ
 - จำนวนสินค้ารวม N รายการ → ต้องได้ items ครบ N (ไม่นับส่วนลด/โปรโมชั่น)"""
 
     try:
@@ -1793,6 +1809,10 @@ def _merge_gdrive_lines(lines: list) -> list:
         lines = expanded
         out = []
         i = 0
+        _hdr_pattern = re.compile(
+            r'(?:ซีเจ|เจ|CJ)\s*มอ[รส]?สาขา|สาขาที่\s*\d|เบอร์ร้าน'
+            r'|MORE\s*TAX|VAT\s*INCLUDED|ใบเสร็จ|ใบกากับ',
+            re.IGNORECASE)
         while i < len(lines):
             line = lines[i].strip()
             line = re.sub(
@@ -1912,7 +1932,10 @@ def _merge_gdrive_lines(lines: list) -> list:
             r'BNO|8NO|TAX|VAT|POS|User|ID:|TAXID'
             r'|บอลราม|บอดราม|ยอดรวม|บอลรวม|UORTIN|UORT'
             r'|เงินสด|เงินทอน|เงินเด|ในสต|เงินบน|รวมทั้งสิ้น'
+            r'|(?:ซีเจ|เจ|CJ)\s*(?:มอ[รส]?(?:ร์)?)\s*(?:สาขา|ลาขา|ฉาขา)'  # ← แทนที่เดิม
+            r'|(?:มอ[รส]?(?:ร์)?)\s*(?:สาขา|ลาขา)'                          # ← แทนที่เดิม
             r'|มอร์สาขา|มอสสาขา|มอร์ลาขา|ซีเจ\s*มอ|CJ\s*มอ'  # ← เพิ่ม
+            r'|สาขาที่\d|สาขา\s*\d|เขื่อน|ปราการ|นครนายก|องครักษ์'  # ← เพิ่ม
             r'|เบอร์ร้าน|เบอร์\s*ร้าน|\d{3}-\d{7}', 
             re.IGNORECASE)
 
@@ -2002,19 +2025,38 @@ def _merge_gdrive_lines(lines: list) -> list:
             elif not _DATE_RE3.match(s) and (
                     _item_start.match(s) or
                     (_has_thai.search(s) and not _skip_hdr.search(s))):
-                if _kw_count.search(s) or _kw_count.search(re.sub(r'\s+','',s)):  # ← เพิ่ม check ก่อน
-                    continue
-                if _skip_note.match(s): continue
+
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
-                elif cur_name:
-                    items_merged.append(cur_name)
+                elif cur_name and not prices_buf:
+                    # ── FIX: item ไม่มีราคา และ next item เป็นโปรโมชั่น
+                    # → look-ahead ข้ามโปรโมชั่นไปหาราคาของ item นี้ก่อน ──
+                    if re.search(r'โปรโมชั่น|promotion', s, re.IGNORECASE):
+                        # s คือโปรโมชั่น, cur_name ยังไม่มีราคา
+                        # หาราคาของ cur_name จาก prices ก่อนโปรโมชั่นจะดูด
+                        _cur_line_idx = lines.index(l) if l in lines else -1
+                        _found_price = None
+                        for _fj in range(_cur_line_idx + 1, min(_cur_line_idx + 5, len(lines))):
+                            _fl = lines[_fj].strip()
+                            _flc = re.sub(r'\s*[Vv]\s*$', '', _fl).strip()
+                        if _price_only.match(_flc) and not re.search(r'[ก-๙]', _flc) and not _neg_price.match(_flc):
+                                _found_price = _flc
+                                break
+                            elif _has_thai.search(_fl):
+                                break
+                        if _found_price:
+                            items_merged.append(f"{cur_name} {_found_price} {_found_price}")
+                        else:
+                            items_merged.append(cur_name)
+                    else:
+                        items_merged.append(cur_name)
+
                 cur_name = None; prices_buf = []
                 if re.search(r'โปรโมชั่น|promotion', s, re.IGNORECASE):
                     items_merged.append(s)
                     in_items = True
-                elif re.match(r'^ส่วนลด\s*$', s):
-                    in_items = True
+                            elif re.match(r'^ส่วนลด\s*$', s):
+                                in_items = True
                 elif not in_items and _skip_hdr.search(s):
                     header_lines.append(s)
                 else:

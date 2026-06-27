@@ -1695,89 +1695,40 @@ def _merge_gdrive_lines(lines: list) -> list:
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|ไปหวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG](?:ml?)?\s*(?:ร้อน|เย็น)?)\s*$', re.IGNORECASE)
     _kw_count   = re.compile(
-        r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม'  # จำนวนสินค้ารวม variants
-        r'|^[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน]',  # สานานสินค้าราม (standalone)
-        re.IGNORECASE
-    )
+        r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม'
+        r'|^[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน]',
+        re.IGNORECASE)
+    _re_price   = re.compile(r'(\d{1,6}[.,]\d{2})')
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
     lines = _split_multi_items(lines)
 
-    # ── FIX: normalize OCR errors ก่อน process ──
     _normalized = []
     for l in lines:
-        # "สวนลด" (ไม่มีวรรณยุกต์) → "ส่วนลด"
         l = re.sub(r'\bสวนลด\b', 'ส่วนลด', l)
-        # "จานวนสินค้ารวม" (ไม่มีวรรณยุกต์) → "จำนวนสินค้ารวม"
         l = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', l)
         _normalized.append(l)
     lines = _normalized
-    # เพิ่มใน _merge_gdrive_lines ก่อน _merge_kw_price
-    def _reorder_inline_v(lines):
-        """
-        แก้ format: item1+price, item2+price, V1, V2
-        → item1+price, V1, item2+price, V2
-        """
-        out = []
-        i = 0
-        while i < len(lines):
-            # ตรวจว่าเป็น block: N items inline ตามด้วย N V lines
-            if (_item_start.match(lines[i].strip()) and
-                    _has_thai.search(lines[i]) and
-                    re.search(r'\d+[.,]\d{2}', lines[i])):
-                # นับ consecutive inline items
-                item_block = []
-                j = i
-                while j < len(lines) and _item_start.match(lines[j].strip()) and _has_thai.search(lines[j]) and re.search(r'\d+[.,]\d{2}', lines[j]):
-                    item_block.append(lines[j])
-                    j += 1
-                # นับ consecutive V/price lines ถัดมา
-                v_block = []
-                while j < len(lines) and _price_only.match(lines[j].strip()) and not _has_thai.search(lines[j]):
-                    v_block.append(lines[j])
-                    j += 1
-                # ถ้า V block ตรงกับ item block → interleave
-                if len(v_block) >= len(item_block):
-                    for k, item in enumerate(item_block):
-                        out.append(item)
-                        # V lines ของ item นี้ (อาจมี 1-2 ตัวต่อ item)
-                        v_per = len(v_block) // len(item_block)
-                        for vl in v_block[k*v_per:(k+1)*v_per]:
-                            out.append(vl)
-                    # V ที่เหลือ (ถ้ามี)
-                    for vl in v_block[len(item_block)*v_per:]:
-                        out.append(vl)
-                    i = j
-                    continue
-            out.append(lines[i])
-            i += 1
-        return out
 
-    lines = _reorder_inline_v(lines)  # ← เพิ่มก่อน _merge_kw_price
-    lines = _merge_kw_price(lines)
-    # ── FIX: _merge_kw_price ตัด note ท้ายชื่อสินค้าด้วย ──
+    # ── ประกาศ nested functions ก่อนเรียกใช้ ──
+
     def _merge_kw_price(lines):
-        _re_price = re.compile(r'(\d{1,6}[.,]\d{2})')  # ← ประกาศ local แทน
         out = []
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            # ตัด "จำนวนสินค้ารวม" และ OCR variants ("สานานสินค้ารามรายการ") ออกจากท้ายบรรทัด
             line = re.sub(
                 r'\s*[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน].*รายการ\s*$', '',
-                line, flags=re.IGNORECASE
-            ).strip()
+                line, flags=re.IGNORECASE).strip()
             line = re.sub(r'สา[นม]านสินค[้า]?ราม\S*', '', line).strip()
-            # ตัด note ท้ายชื่อสินค้า
             line = re.sub(
                 r'\s+(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)\s*$',
-                '', line, flags=re.IGNORECASE
-            ).strip()
-            if _kw_amount.search(line) and not _RE_PRICE.search(line):
+                '', line, flags=re.IGNORECASE).strip()
+            if _kw_amount.search(line) and not _re_price.search(line):
                 j = i + 1
                 if j < len(lines):
                     nx = lines[j].strip()
-                    if _RE_PRICE.search(nx):
+                    if _re_price.search(nx):
                         out.append(line + " " + nx)
                         i = j + 1
                         continue
@@ -1800,10 +1751,8 @@ def _merge_gdrive_lines(lines: list) -> list:
                         1 for l in lines[:block_start]
                         if _item_start.match(l.strip())
                         and _has_thai.search(l)
-                        and not _RE_PRICE.search(l)
+                        and not _re_price.search(l)
                     )
-                    # ตรวจว่า price_lines (หลัง block_start) ไม่มีชื่อสินค้าปะปน
-                    # ถ้ามี → format แบบ interleaved ไม่ใช่ price block
                     item_in_prices = sum(
                         1 for l in lines[i+1:i+10]
                         if _item_start.match(l.strip())
@@ -1819,6 +1768,44 @@ def _merge_gdrive_lines(lines: list) -> list:
                 block_start = None
         return None
 
+    def _reorder_inline_v(lines):
+        """แก้ format: item1+price, item2+price, V1, V2 → item1+price, V1, item2+price, V2"""
+        out = []
+        i = 0
+        while i < len(lines):
+            if (_item_start.match(lines[i].strip()) and
+                    _has_thai.search(lines[i]) and
+                    re.search(r'\d+[.,]\d{2}', lines[i])):
+                item_block = []
+                j = i
+                while (j < len(lines) and
+                       _item_start.match(lines[j].strip()) and
+                       _has_thai.search(lines[j]) and
+                       re.search(r'\d+[.,]\d{2}', lines[j])):
+                    item_block.append(lines[j])
+                    j += 1
+                v_block = []
+                while (j < len(lines) and
+                       _price_only.match(lines[j].strip()) and
+                       not _has_thai.search(lines[j])):
+                    v_block.append(lines[j])
+                    j += 1
+                if len(v_block) >= len(item_block) and len(item_block) > 1:
+                    v_per = len(v_block) // len(item_block)
+                    for k, item in enumerate(item_block):
+                        out.append(item)
+                        for vl in v_block[k*v_per:(k+1)*v_per]:
+                            out.append(vl)
+                    for vl in v_block[len(item_block)*v_per:]:
+                        out.append(vl)
+                    i = j
+                    continue
+            out.append(lines[i])
+            i += 1
+        return out
+
+    # ── เรียกใช้ตามลำดับ ──
+    lines = _reorder_inline_v(lines)
     lines = _merge_kw_price(lines)
     lines = [re.sub(r'\b(\d{1,2}):(\d{2})\b',
                     lambda m: f"{m.group(1)}.{m.group(2)}", l) for l in lines]
@@ -1826,8 +1813,6 @@ def _merge_gdrive_lines(lines: list) -> list:
     price_block_start = _find_price_block(lines)
 
     if price_block_start and price_block_start > 0:
-        # ── State machine parse สำหรับ Google Drive OCR format ──
-        # Format: ชื่อสินค้า → ราคาต่อหน่วย → ราคารวม V → ชื่อถัดไป → ...
         _neg_price = re.compile(r'^-\s*[\d,.]+\s*[Vv]?\s*$')
         _DATE_RE3  = re.compile(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}')
         _skip_hdr  = re.compile(r'BNO|8NO|TAX|VAT|POS|User|ID:|TAXID', re.IGNORECASE)
@@ -1835,8 +1820,7 @@ def _merge_gdrive_lines(lines: list) -> list:
         def _strip_note(s):
             return re.sub(
                 r'\s+(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)\s*$',
-                '', s, flags=re.IGNORECASE
-            ).strip()
+                '', s, flags=re.IGNORECASE).strip()
 
         items_merged = []
         header_lines = []
@@ -1844,13 +1828,14 @@ def _merge_gdrive_lines(lines: list) -> list:
         prices_buf = []
         in_items = False
 
+        _kw_am_sm = re.compile(
+            r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม|บอลราม',
+            re.IGNORECASE)
+
         for l in lines:
             s = l.strip()
             if not s: continue
-            _kw_am_sm = re.compile(
-                r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม|บอลราม',
-                re.IGNORECASE)
-            # ✅ แก้ — indent ให้ถูก
+
             if _kw_am_sm.search(s):
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
@@ -1866,19 +1851,19 @@ def _merge_gdrive_lines(lines: list) -> list:
                             if _kw_count.search(_lc): continue
                             if re.search(r'[ก-๙]', _lc) and not _price_only.match(_lc):
                                 if re.match(r'^\d+\s+[ก-๙A-Za-z].{2,}', _lc):
-                                    break   # item ใหม่ → หยุด
+                                    break
                                 elif re.search(r'รหัส|แคม|แสน|นนทม|CR\s|LW$|บท$|บล่ม|บ\./น', _lc):
-                                    continue  # noise keywords → ข้าม
+                                    continue
                                 elif len(re.sub(r'\s+', '', _lc)) <= 15:
-                                    continue  # สั้นมาก = noise → ข้าม
+                                    continue
                                 else:
-                                    break   # Thai text ยาวที่ไม่รู้จัก → หยุด
+                                    break
                             if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
                                 _lookahead_price = _lc
                                 break
                             if _has_thai.search(_ls) and not _skip_note.match(_ls) and not _kw_count.search(_ls):
                                 break
-                    if _lookahead_price:                   # ← ระดับเดียวกับ if _cur_idx
+                    if _lookahead_price:
                         items_merged.append(f"{cur_name} {_lookahead_price} {_lookahead_price}")
                     else:
                         items_merged.append(cur_name)
@@ -1904,8 +1889,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                 in_items = True
             elif not _DATE_RE3.match(s) and (
                     _item_start.match(s) or
-                    (_has_thai.search(s) and not _skip_hdr.search(s))
-                ):
+                    (_has_thai.search(s) and not _skip_hdr.search(s))):
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
                 elif cur_name:
@@ -1933,6 +1917,7 @@ def _merge_gdrive_lines(lines: list) -> list:
             items_merged.append(cur_name)
 
         return header_lines + items_merged
+
     else:
         merged = []
         i = 0
@@ -1944,8 +1929,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                 combined = line
                 j = i + 1
                 price_count = 0
-        
-                # ── FIX: ถ้า line มีราคา inline และ next line เป็น item ใหม่ → flush ทันที ──
+
                 has_inline_price = bool(re.search(r'\d+[.,]\d{2}', line))
                 if has_inline_price and j < len(lines):
                     nx = lines[j].strip()
@@ -1956,21 +1940,19 @@ def _merge_gdrive_lines(lines: list) -> list:
                         while skip_j < len(lines):
                             sv = re.sub(r'\s*[Vv]\s*$', '', lines[skip_j].strip()).strip()
                             if sv in inline_vals:
-                                skip_j += 1  # ข้าม V line นี้
+                                skip_j += 1
                             else:
                                 break
-                        i = skip_j  # เริ่มต่อหลัง V lines
-                        
+                        i = skip_j
                         continue
-                    # ── FIX เพิ่ม: ถ้า next line เป็น V confirm ของ inline price → skip V แล้ว flush ──
                     nxc = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
                     inline_prices = re.findall(r'\d+[.,]\d{2}', line)
                     if inline_prices and nxc in inline_prices:
-                        # V line ยืนยัน inline price → flush item นี้ ข้าม V line
                         merged.append(combined)
-                        j += 1  # ข้าม V line
+                        j += 1
                         i = j
                         continue
+
                 while j < len(lines) and price_count < 2:
                     nx = lines[j].strip()
                     if not nx: break
@@ -1994,21 +1976,19 @@ def _merge_gdrive_lines(lines: list) -> list:
                         if _item_start.match(nx):
                             merged.append(combined)
                             combined = nx
-                            j += 1                    # ← เพิ่ม
+                            j += 1
                         else:
                             combined += " " + nx
                             j += 1
-                        
                     else:
                         break
                 if price_count > 0:
                     merged.append(combined); i = j; continue
-            # skip standalone note
             if _skip_note.match(line):
                 i += 1; continue
             merged.append(line); i += 1
         return merged
-
+       
 # ── FIX: extract_items_cj ครบทุกจุด ──
 def extract_items_cj(text: str) -> list:
     items  = []

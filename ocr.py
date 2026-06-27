@@ -1757,6 +1757,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     lines = _merge_kw_price(lines)
     # ── FIX: _merge_kw_price ตัด note ท้ายชื่อสินค้าด้วย ──
     def _merge_kw_price(lines):
+        _re_price = re.compile(r'(\d{1,6}[.,]\d{2})')  # ← ประกาศ local แทน
         out = []
         i = 0
         while i < len(lines):

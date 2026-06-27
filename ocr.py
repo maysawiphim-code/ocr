@@ -1854,7 +1854,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                             if re.search(r'[ก-๙]', _lc) and not _price_only.match(_lc):
                                 if re.match(r'^\d+\s+[ก-๙A-Za-z].{2,}', _lc):
                                     break
-                                elif re.(r'รหัส|แคม|แสน|นนทม|CR\s|LW$|บท$|บล่ม|บ\./น|User|BNO|POS', _lc, re.IGNORECASE):
+                                elif re.search(r'รหัส|แคม|แสน|นนทม|CR\s|LW$|บท$|บล่ม|บ\./น|User|BNO|POS', _lc, re.IGNORECASE):
                                     continue
                                 elif len(re.sub(r'\s+', '', _lc)) <= 15:
                                     continue
@@ -1862,7 +1862,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                                     break
                             if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
                                 if not _lookahead_prices or _lc != _lookahead_prices[-1]:
-                                _lookahead_price = _lc
+                                    _lookahead_price = _lc
                                 if len(_lookahead_prices) >= pending_count:
                                     break
                             if _has_thai.search(_ls) and not _skip_note.match(_ls) and not _kw_count.search(_ls):
@@ -1871,7 +1871,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                         price_idx = 0
                         for mi, mitem in enumerate(items_merged):
                             if not re.search(r'\d+[.,]\d{2}', mitem) and price_idx < len(_lookahead_prices):
-                                items_merged[mi] = f"{mitem} {_lookahead_prices[price_idx]} {_lookahead_prices[price_idx]}"
+                                    items_merged[mi] = f"{mitem} {_lookahead_prices[price_idx]} {_lookahead_prices[price_idx]}"
                                 price_idx += 1
                         # cur_name
                         if price_idx < len(_lookahead_prices):

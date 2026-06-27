@@ -1742,6 +1742,9 @@ def _merge_gdrive_lines(lines: list) -> list:
         block_start = None
         for i, line in enumerate(lines):
             s = line.strip()
+            # ── FIX: ถ้าเจอ kw_amount ก่อน price block → return None
+            if _kw_amount.search(s) and not _re_price.search(s):
+                return None
             if _price_only.match(s) and s:
                 if consec == 0:
                     block_start = i
@@ -1961,6 +1964,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                     nxc = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
                     inline_prices = re.findall(r'\d+[.,]\d{2}', line)
                     if inline_prices and nxc in inline_prices:
+                        combined += ' ' + nxc
                         merged.append(combined)
                         j += 1
                         i = j

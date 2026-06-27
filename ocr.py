@@ -712,7 +712,7 @@ def _get_gemini_keys() -> list:
         k = st.secrets.get("GEMINI_API_KEY", os.environ.get("GEMINI_API_KEY", ""))
         if k.strip(): keys.append(k.strip())
         # key เพิ่มเติม _2 ถึง _11
-        for i in range(2, 12):
+        for i in range(1, 12):
             k = st.secrets.get(f"GEMINI_API_KEY_{i}", os.environ.get(f"GEMINI_API_KEY_{i}", ""))
             if k.strip(): keys.append(k.strip())
     except Exception:

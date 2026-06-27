@@ -1659,22 +1659,20 @@ _multi_item = re.compile(
 )
 
 def _split_multi_items(lines: list) -> list:
-    """แยกบรรทัดที่มี 2 items ติดกัน เช่น '1 xxxxxx 1 yyyyyy จำนวน...' """
     out = []
     for l in lines:
         s = l.strip()
-        # เงื่อนไข: ต้องมี digit+Thai 2 ชุด
-        if not re.search(r'^\d+\s+[ก-๙A-Za-z].*\s+\d+\s+[ก-๙A-Za-z]', s):
+        # ตัด KCOUNT suffix ออกก่อน
+        s_clean = re.sub(r'\s*จ[าำ]?.{0,6}(?:นค้า|ค่า|สินค้า)?รวม.*$', '', s, flags=re.IGNORECASE).strip()
+        if not re.search(r'^\d+\s+[ก-๙A-Za-z].*\s+\d+\s+[ก-๙A-Za-z]', s_clean):
             out.append(l); continue
-        # ถ้ามีราคา dd.dd ในครึ่งแรก → ไม่แยก (item+price ปกติ)
-        first_part = s[:len(s)//2]
+        first_part = s_clean[:len(s_clean)//2]
         if re.search(r'\d+[.,]\d{2}', first_part):
             out.append(l); continue
-        m = _multi_item.match(s)
+        m = _multi_item.match(s_clean)   # ← match กับ s_clean
         if m:
             p1 = m.group(1).strip()
             p2 = m.group(2).strip()
-            # ต้องมี Thai ≥ 2 ตัวในทั้งสอง part
             if (len(re.findall(r'[ก-๙]', p1)) >= 2 and len(p2) >= 4):
                 out.append(p1)
                 out.append(p2)
@@ -1689,7 +1687,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     _has_thai   = re.compile(r'[ก-๙]')
     _item_start = re.compile(r'^(?:\d+|-)\s*\S')
     _kw_amount  = re.compile(
-        r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
+        r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม|บอลราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|ไปหวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG](?:ml?)?\s*(?:ร้อน|เย็น)?)\s*$', re.IGNORECASE)
     _kw_count   = re.compile(
@@ -1803,7 +1801,7 @@ def _merge_gdrive_lines(lines: list) -> list:
             s = l.strip()
             if not s: continue
             _kw_am_sm = re.compile(
-                r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม',
+                r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม|บอลราม',
                 re.IGNORECASE)
             # ✅ แก้ — indent ให้ถูก
             if _kw_am_sm.search(s):
@@ -1822,8 +1820,12 @@ def _merge_gdrive_lines(lines: list) -> list:
                             if re.search(r'[ก-๙]', _lc) and not _price_only.match(_lc):
                                 if re.match(r'^\d+\s+[ก-๙A-Za-z].{2,}', _lc):
                                     break   # item ใหม่ → หยุด
+                                elif re.search(r'รหัส|แคม|แสน|นนทม|CR\s|LW$|บท$|บล่ม|บ\./น', _lc):
+                                    continue  # noise keywords → ข้าม
+                                elif len(re.sub(r'\s+', '', _lc)) <= 15:
+                                    continue  # สั้นมาก = noise → ข้าม
                                 else:
-                                    continue # noise → ข้าม
+                                    break   # Thai text ยาวที่ไม่รู้จัก → หยุด
                             if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
                                 _lookahead_price = _lc
                                 break
@@ -1895,6 +1897,15 @@ def _merge_gdrive_lines(lines: list) -> list:
                 combined = line
                 j = i + 1
                 price_count = 0
+        
+                # ── FIX: ถ้า line มีราคา inline และ next line เป็น item ใหม่ → flush ทันที ──
+                has_inline_price = bool(re.search(r'\d+[.,]\d{2}', line))
+                if has_inline_price and j < len(lines):
+                    nx = lines[j].strip()
+                    if _item_start.match(nx) and _has_thai.search(nx):
+                        merged.append(combined)
+                        i += 1
+                        continue
                 while j < len(lines) and price_count < 2:
                     nx = lines[j].strip()
                     if not nx: break

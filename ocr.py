@@ -705,7 +705,7 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
 _GEMINI_API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
 
 def _get_gemini_keys() -> list:
-    """ดึง Gemini API keys ทั้งหมด (GEMINI_API_KEY, GEMINI_API_KEY_2, ... _11)"""
+    """ดึง Gemini API keys ทั้งหมด (GEMINI_API_KEY_1, GEMINI_API_KEY_2, ... _11)"""
     keys = []
     try:
         # key หลัก

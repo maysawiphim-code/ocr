@@ -2677,10 +2677,10 @@ def run_batch_mode_ui():
                     st.warning(fname[:16])
     st.divider()
     if S.ocr_engine in ("gdrive", "gemini_vision"):
-    bills_col, _ = st.columns([2, 2])
-    with bills_col:
-        bills_per_img = st.radio(
-            "📄 แต่ละรูปมีกี่บิล", [1, 2, 3], ...)
+        bills_col, _ = st.columns([2, 2])
+        with bills_col:
+            bills_per_img = st.radio(
+                "📄 แต่ละรูปมีกี่บิล", [1, 2, 3], ...)
                 index=S.get("batch_bills_per_image", 1) - 1,
                 horizontal=True, key="batch_bills_per_image_radio")
             S["batch_bills_per_image"] = bills_per_img

@@ -1442,6 +1442,8 @@ def universal_item_parser(text: str) -> list:
         r'|^บาว\s*คาเฟ|^ลูกค้าสามารถ|^\*แต้ม|^\*\s*แต้ม'
         r'|ใบเสร็จรับเงิน|ใบกำกับภาษี|ใบกากับภาษี'
         r'|MORE\s*TAX|VAT\s*INCLUDED'
+        r'|\d+[.,]\d{2}\s*บาท\s+\d+[.,]\d{2}\s*บาท'  # ← "38.00 บาท 100.00 บาท 62.00 บาท"
+        r'|^\d+\s+แต้ม\s+\d+\s+แต้ม',                 # ← "1 แต้ม 311 แต้ม"
         r'|เบอร์ร้าน|เบอร์\s*ร้าน|\d{3}-\d{7,}',
         re.IGNORECASE)
     _KCOUNT   = re.compile(
@@ -1522,6 +1524,8 @@ def universal_item_parser(text: str) -> list:
             _NOTE.match(s) or
             re.search(r'แต้มสะสม|แต้มหมด|แต้มครั้ง|เติมสะสม|เติมครั้ง',s) or
             re.match(r'^\d+(?:แต้ม|เติม|แต่ม)',s) or
+            re.match(r'^\d+\s+แต้ม\s+\d+\s+แต้ม', s) or   # ← เพิ่ม "1 แต้ม 311 แต้ม"
+            re.match(r'^\d+[.,]\d{2}\s*บาท', s) or          # ← เพิ่ม "38.00 บาท..."
             re.search(r'(?:ne-)?User\w+.*(?:POS|PCS)|BNO[:\s.]',s,re.IGNORECASE) or  # User+BNO ปนกลาง
             re.match(r'^(?:QR|OR|0R|Grab)\s*$',s,re.IGNORECASE) or   # payment keyword เดี่ยว
             re.match(r'^\d+[.,]\d{2}\s*บาท\s*$',s) or              # "40.00 บาท" → ยอดชำระ
@@ -1708,7 +1712,49 @@ def _merge_gdrive_lines(lines: list) -> list:
         l = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', l)
         _normalized.append(l)
     lines = _normalized
+    # เพิ่มใน _merge_gdrive_lines ก่อน _merge_kw_price
+    def _reorder_inline_v(lines):
+        """
+        แก้ format: item1+price, item2+price, V1, V2
+        → item1+price, V1, item2+price, V2
+        """
+        out = []
+        i = 0
+        while i < len(lines):
+            # ตรวจว่าเป็น block: N items inline ตามด้วย N V lines
+            if (_item_start.match(lines[i].strip()) and
+                    _has_thai.search(lines[i]) and
+                    re.search(r'\d+[.,]\d{2}', lines[i])):
+                # นับ consecutive inline items
+                item_block = []
+                j = i
+                while j < len(lines) and _item_start.match(lines[j].strip()) and _has_thai.search(lines[j]) and re.search(r'\d+[.,]\d{2}', lines[j]):
+                    item_block.append(lines[j])
+                    j += 1
+                # นับ consecutive V/price lines ถัดมา
+                v_block = []
+                while j < len(lines) and _price_only.match(lines[j].strip()) and not _has_thai.search(lines[j]):
+                    v_block.append(lines[j])
+                    j += 1
+                # ถ้า V block ตรงกับ item block → interleave
+                if len(v_block) >= len(item_block):
+                    for k, item in enumerate(item_block):
+                        out.append(item)
+                        # V lines ของ item นี้ (อาจมี 1-2 ตัวต่อ item)
+                        v_per = len(v_block) // len(item_block)
+                        for vl in v_block[k*v_per:(k+1)*v_per]:
+                            out.append(vl)
+                    # V ที่เหลือ (ถ้ามี)
+                    for vl in v_block[len(item_block)*v_per:]:
+                        out.append(vl)
+                    i = j
+                    continue
+            out.append(lines[i])
+            i += 1
+        return out
 
+    lines = _reorder_inline_v(lines)  # ← เพิ่มก่อน _merge_kw_price
+    lines = _merge_kw_price(lines)
     # ── FIX: _merge_kw_price ตัด note ท้ายชื่อสินค้าด้วย ──
     def _merge_kw_price(lines):
         out = []
@@ -1811,7 +1857,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                     _lookahead_price = None
                     _cur_idx = lines.index(l) if l in lines else -1
                     if _cur_idx >= 0:
-                        for _j in range(_cur_idx + 1, min(_cur_idx + 20, len(lines))):
+                        for _j in range(_cur_idx + 1, min(_cur_idx + 25, len(lines))):
                             _ls = lines[_j].strip()
                             _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
                             if not _lc: continue
@@ -1904,7 +1950,25 @@ def _merge_gdrive_lines(lines: list) -> list:
                     nx = lines[j].strip()
                     if _item_start.match(nx) and _has_thai.search(nx):
                         merged.append(combined)
-                        i += 1
+                        inline_vals = re.findall(r'(\d+[.,]\d{2})', line)
+                        skip_j = j
+                        while skip_j < len(lines):
+                            sv = re.sub(r'\s*[Vv]\s*$', '', lines[skip_j].strip()).strip()
+                            if sv in inline_vals:
+                                skip_j += 1  # ข้าม V line นี้
+                            else:
+                                break
+                        i = skip_j  # เริ่มต่อหลัง V lines
+                        
+                        continue
+                    # ── FIX เพิ่ม: ถ้า next line เป็น V confirm ของ inline price → skip V แล้ว flush ──
+                    nxc = re.sub(r'\s*[Vv]\s*$', '', nx).strip()
+                    inline_prices = re.findall(r'\d+[.,]\d{2}', line)
+                    if inline_prices and nxc in inline_prices:
+                        # V line ยืนยัน inline price → flush item นี้ ข้าม V line
+                        merged.append(combined)
+                        j += 1  # ข้าม V line
+                        i = j
                         continue
                 while j < len(lines) and price_count < 2:
                     nx = lines[j].strip()
@@ -1974,7 +2038,7 @@ def extract_items_cj(text: str) -> list:
                 "สมาชิก","ID:","หวานน้อย","ลดน้ำตาล",
                 "www.","FB:","ร้องเรียน","สมัคร",  # ← เพิ่ม comma ตรงนี้
                 "เบอร์ร้าน","เบอร์โทร","MORE TAX","VAT INCLUDED",
-                "ใบกากับ","ใบกำกับ","ใบเสร็จรับ",
+                "ใบกากับ","ใบกำกับ","ใบเสร็จรับ","บาท 100","บาท 62",   # ยอดชำระ patterns
                 "ID:E","ID-E"]
 
     _SUFFIX = r'[\sA-Za-z\u0E00-\u0E7F"\u201c\u201d|!！Vv]*'

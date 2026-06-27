@@ -959,6 +959,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - "2 Bao_ชาเขียว 40.00 80.00 V" → จำนวน=2, unit=40, total=80
 - ถ้ามี N สินค้า ราคา N ตัวถัดมาเรียงตามลำดับ (แม้มี User/BNO คั่น)
 - "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N ชิ้น (ไม่นับโปรโมชั่น)
+- "1,285.00" หรือ "1,196.00" บรรทัดเดียว = ยอดรวมสินค้า ไม่ใช่ item
 
 ห้ามนำสิ่งเหล่านี้มาเป็นชื่อสินค้า (เด็ดขาด):
 - ชื่อสาขา, เบอร์โทรศัพท์ (0xx-xxxxxxx), TAX ID, MORE TAX, VAT INCLUDED
@@ -968,6 +969,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - Grab Mart, Order no. GM-xxx → ช่องทางชำระ ไม่ใช่สินค้า
 - บาว คาเฟ คิวที่..., ร้องเรียน, ขอบคุณ, ลูกค้าสามารถ
 - "จำนวนสินค้ารวม N รายการ XX.00" → ยอดรวม ไม่ใช่สินค้า
+- ชื่อร้าน/สาขา เช่น "เจ มอสสาขาที่01351..." หรือ "ซีเจ มอร์สาขา..." → ข้ามไป ไม่ใช่สินค้า
 
 กรองตัวอักษรขยะ (noise) ออก:
 - ชื่อสินค้าต้องมีตัวอักษรไทยหรืออังกฤษที่อ่านออก ความยาว >= 3 ตัว
@@ -984,6 +986,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - "1 โปรโมชั่น 1แถม1 Bao -40.00" → item "โปรโมชั่น 1แถม1 Bao" ราคา -40.00
 - "3 โปรโมชั่น2ชิ้น35บ TAO KAE NOI -15.00" → qty=3, unit=-5, total=-15
 - Pattern บวก+ลบ: "โปรโมชั่น\n87.00\n-5.00" → ใช้เฉพาะ -5.00 (87.00=ยอดก่อนหัก ข้ามไป)
+- โปรโมชั่นที่มีราคาบวก เช่น "2 โปรโมชั่นราคาพิเศษ55บ\n48.00" → ราคาจริง = -48.00 (ลบเสมอ)
 - ห้ามใช้ราคาบวกหลังโปรโมชั่นเป็นส่วนลด ส่วนลดต้องติดลบเสมอ
 - ห้ามนำ "จำนวนสินค้ารวม XX.00" มาเป็นมูลค่าส่วนลด
 
@@ -1496,7 +1499,8 @@ def universal_item_parser(text: str) -> list:
         r'|ใบเสร็จรับเงิน|ใบกำกับภาษี|ใบกากับภาษี'
         r'|MORE\s*TAX|VAT\s*INCLUDED'
         r'|\d+[.,]\d{2}\s*บาท\s+\d+[.,]\d{2}\s*บาท'  # ← "38.00 บาท 100.00 บาท 62.00 บาท"
-        r'|^\d+\s+แต้ม\s+\d+\s+แต้ม'                 # ← "1 แต้ม 311 แต้ม"
+        r'|^\d+\s+แต้ม\s+\d+\s+แต้ม'
+        r'|^\d{1,3}(?:,\d{3})+[.,]\d{2}\s*$'                 # ← "1 แต้ม 311 แต้ม"
         r'|เบอร์ร้าน|เบอร์\s*ร้าน|\d{3}-\d{7,}',
         re.IGNORECASE)
     _KCOUNT   = re.compile(
@@ -1712,44 +1716,49 @@ def universal_item_parser(text: str) -> list:
         it["หมวดหมู่"] = _categorize_by_rule(it["ชื่อสินค้า"])
     return items
 _multi_item = re.compile(
-    r'^(\d+\s+[ก-๙A-Za-z][ก-๙\s]{2,}?)\s+(\d+\s+[ก-๙A-Za-z].{2,}?)(?:\s+จ.{0,15}รวม.*)?\s*$'
+    r'^(\d+[.\s]+[ก-๙A-Za-z][ก-๙\s]{2,}?)\s+(\d+[.\s]*[ก-๙A-Za-z].{2,}?)(?:\s+จ.{0,15}รวม.*)?\s*$'
 )
 
 def _split_multi_items(lines: list) -> list:
-    out = []
-    for l in lines:
-        s = l.strip()
-        # ตัด KCOUNT suffix ออกก่อน
-        s_clean = re.sub(r'\s*จ[าำ]?.{0,6}(?:นค้า|ค่า|สินค้า)?รวม.*$', '', s, flags=re.IGNORECASE).strip()
-        if not re.search(r'^\d+\s+[ก-๙A-Za-z].*\s+\d+\s+[ก-๙A-Za-z]', s_clean):
-            out.append(l); continue
-        first_part = s_clean[:len(s_clean)//2]
-        if re.search(r'\d+[.,]\d{2}', first_part):
-            out.append(l); continue
-        m = _multi_item.match(s_clean)   # ← match กับ s_clean
-        if m:
-            p1 = m.group(1).strip()
-            p2 = m.group(2).strip()
-            if (len(re.findall(r'[ก-๙]', p1)) >= 2 and len(p2) >= 4):
-                out.append(p1)
-                out.append(p2)
-                continue
-        out.append(l)
-    return out
+    # ── FIX: loop จนไม่มีอะไรเปลี่ยน (รองรับ 5+ items ในบรรทัดเดียว) ──
+    prev = None
+    while prev != lines:
+        prev = lines[:]
+        out = []
+        for l in lines:
+            s = l.strip()
+            s_clean = re.sub(r'\s*จ[าำ]?.{0,6}(?:นค้า|ค่า|สินค้า)?รวม.*$', '', s, flags=re.IGNORECASE).strip()
+            if not re.search(r'^\d+\s+[ก-๙A-Za-z].*\s+\d+\s+[ก-๙A-Za-z]', s_clean):
+                out.append(l); continue
+            first_part = s_clean[:len(s_clean)//2]
+            if re.search(r'\d+[.,]\d{2}', first_part):
+                out.append(l); continue
+            m = _multi_item.match(s_clean)
+            if m:
+                p1 = m.group(1).strip()
+                p2 = m.group(2).strip()
+                if len(re.findall(r'[ก-๙]', p1)) >= 2 and len(p2) >= 4:
+                    out.append(p1)
+                    out.append(p2)
+                    continue
+            out.append(l)
+        lines = out
+    return lines
 
 
 def _merge_gdrive_lines(lines: list) -> list:
     _price_only = re.compile(r'^[\d,.\s]+[Vv]?\s*$')
     _v_only     = re.compile(r'^[Vv]\s*$')
     _has_thai   = re.compile(r'[ก-๙]')
-    _item_start = re.compile(r'^(?:\d+|-)\s*\S')
+    _item_start = re.compile(r'^(?:\d+[.\s]?|-)\s*\S')
     _kw_amount  = re.compile(
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม|บอลราม',
         re.IGNORECASE)
     _skip_note  = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|ไปหวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG](?:ml?)?\s*(?:ร้อน|เย็น)?)\s*$', re.IGNORECASE)
     _kw_count   = re.compile(
         r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม'
-        r'|^[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน]',
+        r'|^[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน]'
+        r'|จ[าำํ]?นวนสินค[้า]?รวมรายการ',
         re.IGNORECASE)
     _re_price   = re.compile(r'(\d{1,6}[.,]\d{2})')
 
@@ -1760,12 +1769,28 @@ def _merge_gdrive_lines(lines: list) -> list:
     for l in lines:
         l = re.sub(r'\bสวนลด\b', 'ส่วนลด', l)
         l = re.sub(r'\bจานวนสินค[้า]?รวม', 'จำนวนสินค้ารวม', l)
+        l = re.sub(r'(\d+),(\d{2})\b', r'\1.\2', l)   # 10,00 → 10.00
+        l = re.sub(r'^\s*\.(\d)', r'\1', l)             # .69.00 → 69.00
         _normalized.append(l)
     lines = _normalized
-
+    _hdr_kw = re.compile(
+    r'BNO|TAX|VAT|POS|User|ID:|MORE|มอร์|สาขา|เบอร์|ซีเจ|CJ',
+    re.IGNORECASE)
     # ── ประกาศ nested functions ก่อนเรียกใช้ ──
 
     def _merge_kw_price(lines):
+        expanded = []
+        for line in lines:
+            s = line.strip()
+            if not _has_thai.search(s) and not re.search(r'[Vv]\s*$', s):
+                prices = re.findall(r'\d{1,3}(?:,\d{3})*[.,]\d{2}', s)
+                rebuilt = re.sub(r'\d{1,3}(?:,\d{3})*[.,]\d{2}', '', s).strip()
+                if len(prices) >= 2 and not rebuilt:
+                    for p in prices:
+                        expanded.append(p)
+                    continue
+            expanded.append(line)
+        lines = expanded
         out = []
         i = 0
         while i < len(lines):
@@ -1777,14 +1802,23 @@ def _merge_gdrive_lines(lines: list) -> list:
             line = re.sub(
                 r'\s+(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)\s*$',
                 '', line, flags=re.IGNORECASE).strip()
+
             if _kw_amount.search(line) and not _re_price.search(line):
                 j = i + 1
                 if j < len(lines):
                     nx = lines[j].strip()
-                    if _re_price.search(nx):
+                    if _re_price.search(nx) and not _has_thai.search(nx):
+                        # ← เพิ่ม: next line เป็นราคาล้วน → merge
                         out.append(line + " " + nx)
                         i = j + 1
                         continue
+                # ← FIX: ไม่ว่า next line จะเป็นอะไร ให้ยังคง append บรรทัดนี้
+                # เพื่อให้ state machine จับ _kw_am_sm ได้
+                if line:
+                    out.append(line)
+                i += 1
+                continue  # ← เพิ่ม: ข้าม else branch
+
             if line:
                 out.append(line)
             i += 1
@@ -1795,7 +1829,6 @@ def _merge_gdrive_lines(lines: list) -> list:
         block_start = None
         for i, line in enumerate(lines):
             s = line.strip()
-            # ── FIX: ถ้าเจอ kw_amount ก่อน price block → return None
             if _kw_amount.search(s) and not _re_price.search(s):
                 return None
             if _price_only.match(s) and s:
@@ -1808,16 +1841,20 @@ def _merge_gdrive_lines(lines: list) -> list:
                         if _item_start.match(l.strip())
                         and _has_thai.search(l)
                         and not _re_price.search(l)
+                        and not _hdr_kw.search(l)        # ← เพิ่มกรอง header
                     )
-                    item_in_prices = sum(
+                    # ── FIX: นับเฉพาะ item ที่มีราคา inline (ไม่ใช่ GDrive format) ──
+                    item_with_inline_price = sum(
                         1 for l in lines[i+1:i+10]
                         if _item_start.match(l.strip())
                         and _has_thai.search(l)
                         and not _price_only.match(l.strip())
                         and not _kw_count.search(l)
                         and not _kw_amount.search(l)
+                        and not re.search(r'โปรโมชั่น|promotion', l, re.IGNORECASE)
+                        and _re_price.search(l)           # ← เฉพาะ inline price
                     )
-                    if name_only_count >= 1 and item_in_prices == 0:
+                    if name_only_count >= 1 and item_with_inline_price == 0:
                         return block_start
             else:
                 consec = 0
@@ -1871,7 +1908,13 @@ def _merge_gdrive_lines(lines: list) -> list:
     if price_block_start and price_block_start > 0:
         _neg_price = re.compile(r'^-\s*[\d,.]+\s*[Vv]?\s*$')
         _DATE_RE3  = re.compile(r'\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}')
-        _skip_hdr  = re.compile(r'BNO|8NO|TAX|VAT|POS|User|ID:|TAXID|บอลราม|บอดราม|ยอดรวม|UORTIN|UORT', re.IGNORECASE)
+        _skip_hdr  = re.compile(
+            r'BNO|8NO|TAX|VAT|POS|User|ID:|TAXID'
+            r'|บอลราม|บอดราม|ยอดรวม|บอลรวม|UORTIN|UORT'
+            r'|เงินสด|เงินทอน|เงินเด|ในสต|เงินบน|รวมทั้งสิ้น'
+            r'|มอร์สาขา|มอสสาขา|มอร์ลาขา|ซีเจ\s*มอ|CJ\s*มอ'  # ← เพิ่ม
+            r'|เบอร์ร้าน|เบอร์\s*ร้าน|\d{3}-\d{7}', 
+            re.IGNORECASE)
 
         def _strip_note(s):
             return re.sub(
@@ -1885,7 +1928,7 @@ def _merge_gdrive_lines(lines: list) -> list:
         in_items = False
 
         _kw_am_sm = re.compile(
-            r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม|บอลราม',
+            r'ยอดรวม|บอดราม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอลรวม|บอลราม|QR\s*ธนาคาร',
             re.IGNORECASE)
 
         for l in lines:
@@ -1959,6 +2002,9 @@ def _merge_gdrive_lines(lines: list) -> list:
             elif not _DATE_RE3.match(s) and (
                     _item_start.match(s) or
                     (_has_thai.search(s) and not _skip_hdr.search(s))):
+                if _kw_count.search(s) or _kw_count.search(re.sub(r'\s+','',s)):  # ← เพิ่ม check ก่อน
+                    continue
+                if _skip_note.match(s): continue
                 if cur_name and prices_buf:
                     items_merged.append(f"{cur_name} {prices_buf[-1]}")
                 elif cur_name:

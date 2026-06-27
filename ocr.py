@@ -1654,6 +1654,33 @@ def universal_item_parser(text: str) -> list:
     for it in items:
         it["หมวดหมู่"] = _categorize_by_rule(it["ชื่อสินค้า"])
     return items
+_multi_item = re.compile(
+    r'^(\d+\s+[ก-๙A-Za-z][ก-๙\s]{2,}?)\s+(\d+\s+[ก-๙A-Za-z].{2,}?)(?:\s+จ.{0,15}รวม.*)?\s*$'
+)
+
+def _split_multi_items(lines: list) -> list:
+    """แยกบรรทัดที่มี 2 items ติดกัน เช่น '1 xxxxxx 1 yyyyyy จำนวน...' """
+    out = []
+    for l in lines:
+        s = l.strip()
+        # เงื่อนไข: ต้องมี digit+Thai 2 ชุด
+        if not re.search(r'^\d+\s+[ก-๙A-Za-z].*\s+\d+\s+[ก-๙A-Za-z]', s):
+            out.append(l); continue
+        # ถ้ามีราคา dd.dd ในครึ่งแรก → ไม่แยก (item+price ปกติ)
+        first_part = s[:len(s)//2]
+        if re.search(r'\d+[.,]\d{2}', first_part):
+            out.append(l); continue
+        m = _multi_item.match(s)
+        if m:
+            p1 = m.group(1).strip()
+            p2 = m.group(2).strip()
+            # ต้องมี Thai ≥ 2 ตัวในทั้งสอง part
+            if (len(re.findall(r'[ก-๙]', p1)) >= 2 and len(p2) >= 4):
+                out.append(p1)
+                out.append(p2)
+                continue
+        out.append(l)
+    return out
 
 
 def _merge_gdrive_lines(lines: list) -> list:
@@ -1672,6 +1699,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     )
 
     lines = [l for l in lines if not _v_only.match(l.strip())]
+    lines = _split_multi_items(lines)
 
     # ── FIX: normalize OCR errors ก่อน process ──
     _normalized = []
@@ -1784,10 +1812,18 @@ def _merge_gdrive_lines(lines: list) -> list:
                 elif cur_name and not prices_buf:
                     _lookahead_price = None
                     _cur_idx = lines.index(l) if l in lines else -1
-                    if _cur_idx >= 0:                      # ← indent เข้า 1 ระดับ
-                        for _j in range(_cur_idx + 1, min(_cur_idx + 15, len(lines))):
+                    if _cur_idx >= 0:
+                        for _j in range(_cur_idx + 1, min(_cur_idx + 20, len(lines))):
                             _ls = lines[_j].strip()
                             _lc = re.sub(r'\s*[Vv]\s*$', '', _ls).strip()
+                            if not _lc: continue
+                            if _skip_note.match(_lc): continue
+                            if _kw_count.search(_lc): continue
+                            if re.search(r'[ก-๙]', _lc) and not _price_only.match(_lc):
+                                if re.match(r'^\d+\s+[ก-๙A-Za-z].{2,}', _lc):
+                                    break   # item ใหม่ → หยุด
+                                else:
+                                    continue # noise → ข้าม
                             if _price_only.match(_lc) and _lc and not re.search(r'[ก-๙]', _lc):
                                 _lookahead_price = _lc
                                 break
@@ -1901,6 +1937,7 @@ def _merge_gdrive_lines(lines: list) -> list:
 def extract_items_cj(text: str) -> list:
     items  = []
     lines  = text.split('\n')
+    lines = _split_multi_items(lines) 
     lines = _merge_gdrive_lines(lines)
 
     start_idx = 0
@@ -2027,7 +2064,7 @@ def extract_items_cj(text: str) -> list:
                 qty = 1 if qty_raw == '-' else int(qty_raw)
                 nm = _clean_item_name(nm)
                 # ลบ suffix "จํานวนสินค้ารวม..." ออกจาก nm ก่อน
-                nm = re.sub(r'\s*จ[าำํ]?นวนสินค[้า]?.*$', '', nm, flags=re.IGNORECASE).strip()
+                nm = re.sub(r'\s*จ.{0,2}นวนสินค.{0,3}รวม.*$', '', nm, flags=re.IGNORECASE).strip()
                 if len(re.sub(r'[^\u0E00-\u0E7FA-Za-z0-9]', '', nm)) >= 2:
                     p = parse_price(price)
                     items.append(_make_item(nm, qty, p, round(p * qty, 2)))  # ✅ flush ทันที

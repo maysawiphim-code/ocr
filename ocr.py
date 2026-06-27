@@ -1414,11 +1414,12 @@ def universal_item_parser(text: str) -> list:
         r'(?:[สจ].{0,6}|นวน|แวน|แจน|ลาน|ชํา)สินค[้า]?.{0,3}ร[าว][มน]'
         r'|[นจสแลช].{0,5}(?:นค้า|ค้า|สค้า|สนค้า|ค่า|สนค่า)ร[าว][มน]'
         r'|ลานาน.{0,5}ร[าว][มน]'  # ลานาน น าราม
+        r'|สานาน.{0,8}ราม' 
         r'|(?:^|\s)-?\s*(?:[สจนแลช]).{0,6}(?:สินค|นค|ค้า|สนค)ร[าว][มน]',
         re.IGNORECASE)
     _PROMO    = re.compile(r'โปรโมชั่น|promotion', re.IGNORECASE)
     _DISC     = re.compile(r'^ส่วนลด\s*$|^สวนลด\s*$', re.IGNORECASE)
-    _NOTE     = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG]ml?)\s*$', re.IGNORECASE)
+    _NOTE = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|ไปหวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG](?:ml?)?\s*(?:ร้อน|เย็น)?)\s*$', re.IGNORECASE)
 
     def _norm_digits(s):
         # comma separator ในราคา เช่น "1,000.00" → "1000.00"
@@ -1629,7 +1630,7 @@ def _merge_gdrive_lines(lines: list) -> list:
     _kw_amount  = re.compile(
         r'ยอดรวม|ยอดราม|ยอดราเม|UORTIN|UORT|เงินสด|เงินเด|ในสต|เงินทอน|เงินบน|รวมทั้งสิ้น|บอดราม',
         re.IGNORECASE)
-    _skip_note  = re.compile(r'^(หวานน้อย|ลดน้ำตาล|ไม่หวาน|หวานปกติ|extra\s*shot)', re.IGNORECASE)
+    _skip_note  = re.compile(r'^(?:หวานน้อย|ลดน้ำตาล|ไม่หวาน|ไปหวาน|หวานปกติ|หวานมาก|extra\s*shot|ใบหราม|\d+[gG](?:ml?)?\s*(?:ร้อน|เย็น)?)\s*$', re.IGNORECASE)
     _kw_count   = re.compile(
         r'จ[าำํ]?นวนสินค[้า]?[่า]?\s*รวม'  # จำนวนสินค้ารวม variants
         r'|^[สจ].{0,4}สินค[้า]?.{0,3}ร[าว][มน]',  # สานานสินค้าราม (standalone)

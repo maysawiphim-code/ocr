@@ -13,10 +13,9 @@ import json
 import gspread
 from google.oauth2.service_account import Credentials
 
-def save_to_sheets(all_bills):
+def save_to_sheets(all_bills, sheet_name): # เพิ่ม sheet_name เข้าไป
     import gspread
     try:
-        # ดึงข้อมูลจาก Secrets ที่คุณตั้งไว้
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=[
             "https://spreadsheets.google.com/feeds",
@@ -24,10 +23,9 @@ def save_to_sheets(all_bills):
         ])
         
         client = gspread.authorize(creds)
-        # ใส่ ID ของไฟล์ที่คุณต้องการบันทึก
-        sheet = client.open_by_key("1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ").worksheet("Data")
-           
-        # เตรียมแถวข้อมูล (ปรับแก้หัวข้อคอลัมน์ให้ตรงกับที่ใช้จริง)
+        # ใช้ sheet_name ที่ส่งเข้ามาแทนคำว่า "Data"
+        sheet = client.open_by_key("1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ").worksheet(sheet_name)
+        
         rows = []
         for b in all_bills:
             bill = b.get('bill', {})
@@ -3012,6 +3010,7 @@ def save_to_sheets(all_bills: list):
         return False
     token = st.session_state["gdrive_token"]
     
+
     try:
         _sheets_ensure_headers(token)
         
@@ -3477,11 +3476,15 @@ def main():
                            file_name="receipts.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
-            if st.button("💾 บันทึกลง Google Sheets"):
-                with st.spinner("กำลังบันทึกข้อมูล..."):
-                    # ย้าย if มาอยู่ใต้ with โดยเว้นระยะให้ตรงกัน
-                    if save_to_sheets(S.all_bills):
-                        st.success("บันทึกข้อมูลสำเร็จแล้ว!")  
+            if st.button("💾 บันทึกลง Sheet1"):
+                with st.spinner("กำลังบันทึก..."):
+                    if save_to_sheets(S.all_bills, "Sheet1"): # ระบุชื่อ Sheet ตรงนี้
+                        st.success("บันทึก Sheet1 สำเร็จ!")
+            
+            if st.button("💾 บันทึกลง sheet2"):
+                with st.spinner("กำลังบันทึก..."):
+                    if save_to_sheets(S.all_bills, "sheet2"): # ระบุชื่อ Sheet ตรงนี้
+                        st.success("บันทึก sheet2 สำเร็จ!")
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v

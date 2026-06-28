@@ -26,10 +26,7 @@ def save_to_sheets(all_bills):
         client = gspread.authorize(creds)
         # ใส่ ID ของไฟล์ที่คุณต้องการบันทึก
         sheet = client.open_by_key("1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ").worksheet("Data")
-        except Exception as e:
-            # เพิ่มบรรทัดนี้เพื่อดูรายละเอียดของ Error ที่แท้จริง
-            st.error(f"รายละเอียด Error: {e}")
-            return False
+           
         # เตรียมแถวข้อมูล (ปรับแก้หัวข้อคอลัมน์ให้ตรงกับที่ใช้จริง)
         rows = []
         for b in all_bills:
@@ -43,6 +40,10 @@ def save_to_sheets(all_bills):
         return True
     except Exception as e:
         st.error(f"บันทึกไม่สำเร็จ: {e}")
+        return False
+     except Exception as e:
+            # เพิ่มบรรทัดนี้เพื่อดูรายละเอียดของ Error ที่แท้จริง
+        st.error(f"รายละเอียด Error: {e}")
         return False
 # ── Google Drive / Docs API ───────────────────────────────────────────────────
 try:

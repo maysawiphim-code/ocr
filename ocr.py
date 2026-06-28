@@ -3474,9 +3474,9 @@ def main():
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
             if st.button("💾 บันทึกลง Google Sheets"):
-        with st.spinner("กำลังบันทึกข้อมูล..."):
-            if save_to_sheets(S.all_bills):
-                st.success("บันทึกข้อมูลสำเร็จแล้ว!")    
+                with st.spinner("กำลังบันทึกข้อมูล..."):
+                    if save_to_sheets(S.all_bills):
+                        st.success("บันทึกข้อมูลสำเร็จแล้ว!")   
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v

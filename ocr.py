@@ -2055,7 +2055,7 @@ def _merge_gdrive_lines(lines: list) -> list:
                             _fl = lines[_fj].strip()
                             _flc = re.sub(r'\s*[Vv]\s*$', '', _fl).strip()
                         if _price_only.match(_flc) and not re.search(r'[ก-๙]', _flc) and not _neg_price.match(_flc):
-                             _found_price = _flc
+                            _found_price = _flc
                             break
                         elif _has_thai.search(_fl):
                             break

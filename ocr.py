@@ -10,7 +10,37 @@ import numpy as np
 import os
 import base64
 import json
+import gspread
+from google.oauth2.service_account import Credentials
 
+def save_to_sheets(all_bills):
+    import gspread
+    try:
+        # ดึงข้อมูลจาก Secrets ที่คุณตั้งไว้
+        creds_dict = st.secrets["gcp_service_account"]
+        creds = Credentials.from_service_account_info(creds_dict, scopes=[
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ])
+        
+        client = gspread.authorize(creds)
+        # ใส่ ID ของไฟล์ที่คุณต้องการบันทึก
+        sheet = client.open_by_key("1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ").worksheet("Data")
+        
+        # เตรียมแถวข้อมูล (ปรับแก้หัวข้อคอลัมน์ให้ตรงกับที่ใช้จริง)
+        rows = []
+        for b in all_bills:
+            bill = b.get('bill', {})
+            rows.append([
+                bill.get('date'), bill.get('time'), bill.get('branch_code'),
+                bill.get('receipt_number'), bill.get('total_amount'), bill.get('discount')
+            ])
+        
+        sheet.append_rows(rows)
+        return True
+    except Exception as e:
+        st.error(f"บันทึกไม่สำเร็จ: {e}")
+        return False
 # ── Google Drive / Docs API ───────────────────────────────────────────────────
 try:
     from googleapiclient.discovery import build
@@ -3447,6 +3477,10 @@ def main():
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
+            if st.button("💾 บันทึกลง Google Sheets"):
+        with st.spinner("กำลังบันทึกข้อมูล..."):
+            if save_to_sheets(S.all_bills):
+                st.success("บันทึกข้อมูลสำเร็จแล้ว!")
             if st.button("🔄 Refresh ข้อมูลจาก Sheet", key="refresh_sheet_cache"):
                 st.session_state.pop("_sheet_correct_items_cache", None)
                 st.success("✅ ล้าง cache แล้ว จะโหลดใหม่รอบหน้า")

@@ -3473,14 +3473,15 @@ def main():
                            file_name="receipts.xlsx",
                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                            use_container_width=True)
+            if st.button("💾 บันทึกลง Google Sheets"):
+        with st.spinner("กำลังบันทึกข้อมูล..."):
+            if save_to_sheets(S.all_bills):
+                st.success("บันทึกข้อมูลสำเร็จแล้ว!")    
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
-            if st.button("💾 บันทึกลง Google Sheets"):
-        with st.spinner("กำลังบันทึกข้อมูล..."):
-            if save_to_sheets(S.all_bills):
-                st.success("บันทึกข้อมูลสำเร็จแล้ว!")
+        
             if st.button("🔄 Refresh ข้อมูลจาก Sheet", key="refresh_sheet_cache"):
                 st.session_state.pop("_sheet_correct_items_cache", None)
                 st.success("✅ ล้าง cache แล้ว จะโหลดใหม่รอบหน้า")

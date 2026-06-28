@@ -947,7 +947,7 @@ def extract_items_with_gemini(raw_text: str) -> list:
     return result.get("items", [])
 
 def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
-     # ── ดึงจำนวนสินค้ารวมจาก raw text ──
+    # ── ดึงจำนวนสินค้ารวมจาก raw text ──
     _n_items_match = re.search(
         r'จ[าำ]?นวนสินค[้า]?\s*รวม\s*(\d+)\s*รายการ',
         raw_text, re.IGNORECASE)
@@ -955,6 +955,7 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
     if _n_items_match:
         n = _n_items_match.group(1)
         n_items_hint = f"\n⚠️ บิลนี้มีสินค้า {n} รายการ — ต้องได้ items ครบ {n} ชิ้น ไม่นับโปรโมชั่น/ส่วนลด"
+
     if ocr_source == "gdrive":
         format_hint = """คุณคือผู้เชี่ยวชาญวิเคราะห์ใบเสร็จ CJ Express
 ข้อความนี้มาจาก OCR ลำดับบรรทัดอาจสลับ ราคาอาจอยู่ไม่ติดชื่อสินค้า
@@ -968,7 +969,6 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - ถ้ามี N สินค้า ราคา N ตัวถัดมาเรียงตามลำดับ (แม้มี User/BNO คั่น)
 - "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N ชิ้น (ไม่นับโปรโมชั่น)
 - "1,285.00" หรือ "1,196.00" บรรทัดเดียว = ยอดรวมสินค้า ไม่ใช่ item
-- บิลที่มี "จำนวนสินค้ารวม N รายการ" ต้องได้ items ครบ N ชิ้น ถ้าได้ไม่ครบให้ตรวจ raw text อีกครั้ง
 - ราคา 2 ตัวในบรรทัดเดียวเช่น "35.00 89.00" → ราคา item 1 และ item 2 ตามลำดับ
 - ราคาที่อยู่ก่อน item name → เป็นราคาของ item ถัดมา
 - โปรโมชั่นราคาบวก เช่น 48.00 หลังโปรโมชั่น → ต้องแปลงเป็น -48.00
@@ -979,83 +979,64 @@ def extract_with_gemini(raw_text: str, ocr_source: str = "gdrive") -> dict:
 - หวานน้อย, ไม่หวาน, ไปหวาน, หวานปกติ, หวานมาก → note เครื่องดื่ม ไม่ใช่สินค้า
 - แต้มสะสม, เงินสด, เงินทอน, ยอดรวม, บอลราม, บอดราม, QR ธนาคาร
 - Grab Mart, Order no. GM-xxx → ช่องทางชำระ ไม่ใช่สินค้า
-- บาว คาเฟ คิวที่..., ร้องเรียน, ขอบคุณ, ลูกค้าสามารถ
+- บาว คาเฟ คิวที่..., ร้องเรียน, ขอบคุณ, ลูกค้าสามารถ, สะสมแต้ม, ร่วมรายการ
 - "จำนวนสินค้ารวม N รายการ XX.00" → ยอดรวม ไม่ใช่สินค้า
-- ชื่อร้าน/สาขา เช่น "เจ มอสสาขาที่01351..." หรือ "ซีเจ มอร์สาขา..." → ข้ามไป ไม่ใช่สินค้า
-- ชื่อสาขา เช่น "เจ มอสสาขาที่01351 เขื่อนขนตาน..." → ข้ามไป ไม่ใช่สินค้า
-- ข้อความที่มีชื่อจังหวัด/อำเภอ เช่น ปราการชล, นครนายก, องครักษ์ → header ข้ามไป
+- ชื่อร้าน/สาขา เช่น "เจ มอสสาขาที่01351..." → ข้ามไป
 
 กรองตัวอักษรขยะ (noise) ออก:
 - ชื่อสินค้าต้องมีตัวอักษรไทยหรืออังกฤษที่อ่านออก ความยาว >= 3 ตัว
 - ตัวอักษรเดี่ยว เช่น "V", "S", "D", "g", "Ba", "ง" → ข้ามไป
-- Noise เช่น "autu", "ne-User", "autuบส้น", "Ba S", "Bake ya" → ข้ามไป
-- บรรทัดที่มีเบอร์โทรปนอยู่ เช่น "061-3902348" → ข้ามทั้งบรรทัด
-- บรรทัดสั้น 1-2 ตัวอักษรที่ไม่ใช่ราคา → ข้ามไป
+- Noise เช่น "autu", "ne-User", "Ba S" → ข้ามไป
 - ถ้าไม่แน่ใจว่าเป็นสินค้าหรือ noise → ข้ามไป อย่าเดา
-- items ที่ถูกต้องต้องมี: ชื่อที่อ่านออก + ราคา >= 5 บาท (หรือติดลบสำหรับส่วนลด)
 
-โปรโมชั่น/ส่วนลด (สำคัญมาก):
+โปรโมชั่น/ส่วนลด:
 - โปรโมชั่นคือส่วนลด → ราคาต้องติดลบเสมอ หมวด "ส่วนลด/โปรโมชั่น"
-- "1 โปรโมชั่นM ราคาพิเศษ30บ -5.00" → item "โปรโมชั่น ราคาพิเศษ30บ" ราคา -5.00
-- "1 โปรโมชั่น 1แถม1 Bao -40.00" → item "โปรโมชั่น 1แถม1 Bao" ราคา -40.00
-- "3 โปรโมชั่น2ชิ้น35บ TAO KAE NOI -15.00" → qty=3, unit=-5, total=-15
-- Pattern บวก+ลบ: "โปรโมชั่น\n87.00\n-5.00" → ใช้เฉพาะ -5.00 (87.00=ยอดก่อนหัก ข้ามไป)
-- โปรโมชั่นที่มีราคาบวก เช่น "2 โปรโมชั่นราคาพิเศษ55บ\n48.00" → ราคาจริง = -48.00 (ลบเสมอ)
-- ห้ามใช้ราคาบวกหลังโปรโมชั่นเป็นส่วนลด ส่วนลดต้องติดลบเสมอ
+- Pattern บวก+ลบ: "โปรโมชั่น\n87.00\n-5.00" → ใช้เฉพาะ -5.00 (87.00=ยอดก่อนหัก)
 - ห้ามนำ "จำนวนสินค้ารวม XX.00" มาเป็นมูลค่าส่วนลด
 
 Bao Cafe:
 - 1B30, lB30, Bao_, Beo, B80, Be0, Bac, BAO → "Bao" เสมอ หมวด "Bao Cafe"
-- "Bao_อเมริกาไปเป็น" → "Bao อเมริกาโน่เย็น" ("เป็น"="เย็น", "_"=space)
-- "Bao_ชาเขียวนมสดปั่น" → "Bao ชาเขียวนมสดปั่น"
-- "Bao_คาปูชิโน่เย็น" → "Bao คาปูชิโน่เย็น"
-- "+1 วิปปิ้งครีม 15.00 15.00" → item เสริม Bao หมวด "Bao Cafe" ราคา +15
+- "Bao_อเมริกาไปเป็น" → "Bao อเมริกาโน่เย็น"
+- "+1 วิปปิ้งครีม 15.00" → item เสริม Bao หมวด "Bao Cafe" ราคา +15
 
 OCR แก้ชื่อผิด:
-- "ขาไทยเป็น" → "ชาไทยเย็น", "เอสเปรสโซ่เป็น" → "เอสเปรสโซ่เย็น"
-- "บอลรวม/บอดรวม" → "ยอดรวม" ข้ามไป, "สวนลด" → "ส่วนลด" ราคาติดลบ
-- "สานานสินค้ารามรายการ" → "จำนวนสินค้ารวม N รายการ" ข้ามไป
-- ตัวเลขหลังชื่อที่ดูเหมือน serial (เช่น 52,030) → ตัดออก ไม่ใช่ราคา
-
-ข้อมูลบิล:
-- pos_id จาก BNO: "BNO:S26061416N03-004232" → pos_id="1416", pos_machine="N03"
-- pos_id จาก BNO: "BNO.S26061416N03-004232" → pos_id="1416" (ทั้ง : และ . ใช้ได้)
-- วันที่ > 2026 → แก้เป็น 2026"""
-
+- "สวนลด" → "ส่วนลด", "บอลรวม/บอดรวม" → ยอดรวม ข้ามไป
+- ตัวเลขหลังชื่อที่ดูเหมือน serial → ตัดออก"""
     else:
         format_hint = """คุณคือผู้เชี่ยวชาญวิเคราะห์ใบเสร็จ CJ Express
 แต่ละสินค้าอยู่บรรทัดเดียว: "จำนวน ชื่อสินค้า ราคา/หน่วย ราคารวม"
 
 กฎการอ่าน:
-- "1 คาราบาวแดง 12.00 12.00" → ชื่อ=คาราบาวแดง, unit=12, total=12
 - "2 คาราบาวแดง 12.00 24.00" → จำนวน=2, unit=12, total=24
 - 1B30, lB30, Bao_, Beo, B80 → "Bao" เสมอ หมวด "Bao Cafe"
 - "+1 วิปปิ้งครีม 15.00" → addon Bao Cafe ราคา +15
-
-ห้ามเป็นชื่อสินค้า:
-- ชื่อสาขา, เบอร์โทร, User, BNO, TAX ID, MORE TAX, VAT INCLUDED
-- หวานน้อย, ไม่หวาน, ไปหวาน, หวานปกติ, หวานมาก
-- Grab Mart, Order no., QR ธนาคาร, บาว คาเฟ คิวที่...
-- รหัสสมาชิก, แต้มสะสม, เงินสด, เงินทอน, ยอดรวม
-
-กรองตัวอักษรขยะ (noise) ออก:
-- ชื่อสินค้าต้องมีตัวอักษรที่อ่านออก ความยาว >= 3 ตัว
-- ตัวอักษรเดี่ยว "V", "S", "D", "g", "Ba" → ข้ามไป
-- Noise "autu", "ne-User" หรือข้อความสั้นที่ไม่ใช่สินค้า → ข้ามไป
-- ถ้าไม่แน่ใจว่าเป็นสินค้าหรือ noise → ข้ามไป
-
-โปรโมชั่น/ส่วนลด:
-- โปรโมชั่น → ราคาติดลบเสมอ หมวด "ส่วนลด/โปรโมชั่น"
-- "1 โปรโมชั่นM ราคาพิเศษ30บ -5.00" → ราคา -5.00
-- "3 โปรโมชั่น2ชิ้น35บ -15.00" → qty=3, unit=-5, total=-15
-- Pattern บวก+ลบ: ใช้เฉพาะราคาลบ ราคาบวก=ยอดก่อนหัก ข้ามไป
-- ห้ามใช้ราคาบวกหลังโปรโมชั่นเป็นส่วนลด
-- ตัวเลขหลังชื่อที่ดูเหมือน serial (เช่น 52,030) → ตัดออก
-
-ข้อมูลบิล:
-- pos_id จาก BNO: "BNO:S26061745N04-xxx" → pos_id="1745", pos_machine="N04"
+- โปรโมชั่น → ราคาติดลบเสมอ Pattern บวก+ลบ: ใช้เฉพาะราคาลบ
+- ห้าม: ชื่อสาขา, เบอร์โทร, User, BNO, หวานน้อย, Grab Mart, แต้มสะสม
+- ตัวอักษรขยะ "V","S","autu" → ข้ามไป
+- pos_id จาก BNO: "BNO:S26061745N04-xxx" → "1745", pos_machine="N04"
 - วันที่ > 2026 → แก้เป็น 2026"""
-    prompt = f"""ใบเสร็จ CJ Express:{n_items_hint}
+
+    # ── Step 1: Header ──
+    header_prompt = f"""จากใบเสร็จ CJ Express นี้ สกัดเฉพาะข้อมูล header/footer:
+{raw_text}
+
+ข้อมูลที่ต้องการ:
+- date: วันที่ (dd/mm/yyyy)
+- time: เวลา (HH:MM)
+- branch: ชื่อสาขา (เช่น "สาขา 01351 เขื่อนขุนดาน")
+- pos_id: รหัสสาขา 4 หลักจาก BNO (เช่น BNO:S26061416N03 → "1416")
+- pos_machine: หมายเลข POS จาก BNO (เช่น N03)
+- rcpt_no: เลขที่ใบเสร็จจาก BNO (เต็ม เช่น S26061416N03-004232)
+- total_amount: ยอดรวมสุทธิ (บาท)
+- cash: เงินสด
+- change: เงินทอน
+
+ตอบ JSON เท่านั้น ห้าม markdown:
+{{"date":"","time":"","branch":"","pos_id":"","pos_machine":"","rcpt_no":"","total_amount":0.0,"cash":0.0,"change":0.0}}"""
+
+    # ── Step 2: Items ──
+    items_prompt = f"""จากใบเสร็จ CJ Express นี้ จงสกัดรายการสินค้าทั้งหมดให้ครบทุกรายการ:{n_items_hint}
+
 {raw_text}
 
 {format_hint}
@@ -1063,64 +1044,60 @@ OCR แก้ชื่อผิด:
 {BAO_CAFE_MENU}
 {CJ_PRODUCT_KNOWLEDGE}
 
-ตอบ JSON เท่านั้น:
-{{
-  "date": "วัน/เดือน/ปี",
-  "time": "HH:MM",
-  "branch": "ชื่อสาขา",
-  "pos_id": "รหัสสาขา 4 หลัก จาก BNO",
-  "pos_machine": "NXX",
-  "rcpt_no": "เลขที่ใบเสร็จ",
-  "total_amount": 0.0,
-  "cash": 0.0,
-  "change": 0.0,
-  "items": [{{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}}]
-}}
-
 {CATEGORY_PROMPT}
 
-กฎ:
+กฎสำคัญ:
 - Bao_, Beo, B80, Be0, Ba0, Bao. → "Bao" + หมวด "Bao Cafe"
-- โปรโมชั่น/ส่วนลด → ใส่เป็น item หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
-- "1 โปรโมชั่นM 1 แถม 1 Bao" + "-40.00" → item "โปรโมชั่น 1 แถม 1 Bao" ราคา -40.0
-- "1 โปรโมชั่นM ราคาพิเศษXXบ" + "-XX.00" → item "โปรโมชั่น ราคาพิเศษXXบ" หมวด "ส่วนลด/โปรโมชั่น" ราคาติดลบ
-- "3 โปรโมชั่น2ชิ้น35บ TAO KAE NOI" + "-15.00" → item "โปรโมชั่น 2ชิ้น35บ TAO KAE NOI" ราคา -15.0
-- "+1 วิปปิ้งครีม 15.00 15.00" → สินค้าเสริม ราคา 15.0 หมวด "Bao Cafe"
-- ชื่อสินค้าที่ขึ้นต้นด้วย "+" คือ add-on เครื่องดื่ม Bao → หมวด "Bao Cafe"
-- ถ้า raw text ระบุ "จำนวนสินค้ารวม N รายการ" → ต้องได้ items ครบ N ชิ้น (ไม่นับโปรโมชั่น/ส่วนลด)
-- ถ้าได้ items ไม่ครบ → ตรวจ raw text อีกครั้ง หา items ที่อาจอยู่ในบรรทัดเดียวกัน
-- ราคาที่อยู่ก่อน item name → เป็นราคาของ item ถัดมา
-- ราคา 2 ตัวในบรรทัดเดียว เช่น "35.00 89.00" → ราคา item 1 และ item 2 ตามลำดับ
-- จำนวนสินค้ารวม N รายการ → ต้องได้ items ครบ N (ไม่นับส่วนลด/โปรโมชั่น)"""
+- โปรโมชั่น/ส่วนลด → ราคาติดลบ หมวด "ส่วนลด/โปรโมชั่น"
+- "+1 addon" → item เสริม Bao Cafe ราคาบวก
+- ถ้าได้ items ไม่ครบ → ตรวจ raw text อีกครั้ง
+- ราคา 2 ตัวในบรรทัดเดียว "35.00 89.00" → item 1 และ item 2
+- ราคาที่อยู่ก่อน item → เป็นราคาของ item ถัดมา
+- จำนวนสินค้ารวม N → ต้องได้ items ครบ N (ไม่นับส่วนลด)
+- ห้ามนำ: โฆษณา, คำขอบคุณ, สะสมแต้ม, ร่วมรายการ, ชื่อสาขา, เบอร์โทร มาเป็นสินค้า
+
+ตอบ JSON array เท่านั้น ห้าม markdown:
+[{{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}}]"""
 
     try:
-        text_out = _call_gemini(prompt)
-        text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
-        data = json.loads(text_out)
+        # ── เรียก Gemini 2 ครั้ง ──
+        header_raw = _call_gemini(header_prompt, max_tokens=300)
+        header_raw = re.sub(r"```(?:json)?\s*|\s*```", "", header_raw).strip()
+        header_data = json.loads(header_raw)
+
+        items_raw = _call_gemini(items_prompt, max_tokens=2000)
+        items_raw = re.sub(r"```(?:json)?\s*|\s*```", "", items_raw).strip()
+        items_data = json.loads(items_raw)
+
+        # ── แปลง header ──
+        date_str = str(header_data.get("date", "ไม่พบ"))
+        date_str = re.sub(r'/202[7-9]/', '/2026/', date_str)
+        date_str = re.sub(r'/20[3-9]\d/', '/2026/', date_str)
         bill = {
-            "date":         str(data.get("date", "ไม่พบ")),
-            "time":         str(data.get("time", "ไม่พบ")),
-            "branch":       str(data.get("branch", "ไม่พบ")),
-            "pos_id":       str(data.get("pos_id", "ไม่พบ")),
-            "pos_machine":  str(data.get("pos_machine", "ไม่พบ")),
-            "rcpt_no":      str(data.get("rcpt_no", "ไม่พบ")),
-            "total_amount": float(data.get("total_amount", 0)),
-            "cash":         0.0, "change": 0.0,
+            "date":         date_str,
+            "time":         str(header_data.get("time", "ไม่พบ")),
+            "branch":       str(header_data.get("branch", "ไม่พบ")),
+            "pos_id":       str(header_data.get("pos_id", "ไม่พบ")),
+            "pos_machine":  str(header_data.get("pos_machine", "ไม่พบ")),
+            "rcpt_no":      str(header_data.get("rcpt_no", "ไม่พบ")),
+            "total_amount": float(header_data.get("total_amount", 0)),
+            "cash":         float(header_data.get("cash", 0)),
+            "change":       float(header_data.get("change", 0)),
             "tax_id":       "ไม่พบ", "user": "ไม่พบ", "name": "ไม่พบ",
         }
+
+        # ── แปลง items ──
         items = []
-        for it in data.get("items", []):
+        for it in (items_data if isinstance(items_data, list) else []):
             name = str(it.get("ชื่อสินค้า", ""))
-            if _is_bao_item(name):
-                cat = BAO_CAFE_CATEGORY
-            else:
-                cat = str(it.get("หมวดหมู่", ""))
-                if not cat or cat == "สินค้าเบ็ดเตล็ดอื่นๆ":
-                    rule_cat = _categorize_by_rule(name)
-                    if rule_cat != "สินค้าเบ็ดเตล็ดอื่นๆ":
-                        cat = rule_cat
-                if not cat:
-                    cat = "สินค้าเบ็ดเตล็ดอื่นๆ"
+            if not name or len(name) < 2: continue
+            cat = BAO_CAFE_CATEGORY if _is_bao_item(name) else str(it.get("หมวดหมู่", ""))
+            if not cat or cat == "สินค้าเบ็ดเตล็ดอื่นๆ":
+                rule_cat = _categorize_by_rule(name)
+                if rule_cat != "สินค้าเบ็ดเตล็ดอื่นๆ":
+                    cat = rule_cat
+            if not cat:
+                cat = "สินค้าเบ็ดเตล็ดอื่นๆ"
             items.append({
                 "ชื่อสินค้า":    name,
                 "หมวดหมู่":     cat,
@@ -1128,13 +1105,51 @@ OCR แก้ชื่อผิด:
                 "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย", 0)),
                 "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า", 0)),
             })
-        # ── ถ้า Gemini ไม่ได้ items ให้ fallback universal parser ──
+
         if not items:
             items = universal_item_parser(raw_text)
-        return {"bill": bill, "items": items, "ok": True}
-    except Exception as e:
-        return {"bill": None, "items": [], "ok": False, "error": str(e)}
 
+        return {"bill": bill, "items": items, "ok": True}
+
+    except Exception as e:
+        # fallback: single-step เดิม
+        try:
+            single_prompt = f"""ใบเสร็จ CJ Express:{n_items_hint}
+{raw_text}
+{format_hint}
+{BAO_CAFE_MENU}
+ตอบ JSON: {{"date":"","time":"","branch":"","pos_id":"","pos_machine":"","rcpt_no":"","total_amount":0.0,"cash":0.0,"change":0.0,"items":[{{"ชื่อสินค้า":"","หมวดหมู่":"","จำนวน":1,"ราคาต่อหน่วย":0.0,"ยอดรวมสินค้า":0.0}}]}}"""
+            text_out = _call_gemini(single_prompt, max_tokens=2000)
+            text_out = re.sub(r"```(?:json)?\s*|\s*```", "", text_out).strip()
+            data = json.loads(text_out)
+            bill = {
+                "date": str(data.get("date","ไม่พบ")),
+                "time": str(data.get("time","ไม่พบ")),
+                "branch": str(data.get("branch","ไม่พบ")),
+                "pos_id": str(data.get("pos_id","ไม่พบ")),
+                "pos_machine": str(data.get("pos_machine","ไม่พบ")),
+                "rcpt_no": str(data.get("rcpt_no","ไม่พบ")),
+                "total_amount": float(data.get("total_amount",0)),
+                "cash": 0.0, "change": 0.0,
+                "tax_id": "ไม่พบ", "user": "ไม่พบ", "name": "ไม่พบ",
+            }
+            items = []
+            for it in data.get("items", []):
+                name = str(it.get("ชื่อสินค้า",""))
+                if not name: continue
+                cat = BAO_CAFE_CATEGORY if _is_bao_item(name) else str(it.get("หมวดหมู่",""))
+                if not cat: cat = _categorize_by_rule(name)
+                items.append({
+                    "ชื่อสินค้า": name, "หมวดหมู่": cat,
+                    "จำนวน": int(it.get("จำนวน",1)),
+                    "ราคาต่อหน่วย": float(it.get("ราคาต่อหน่วย",0)),
+                    "ยอดรวมสินค้า": float(it.get("ยอดรวมสินค้า",0)),
+                })
+            if not items:
+                items = universal_item_parser(raw_text)
+            return {"bill": bill, "items": items, "ok": True}
+        except Exception as e2:
+            return {"bill": None, "items": [], "ok": False, "error": str(e2)}
 def _collapse(text: str) -> str:
     return re.sub(r'\s+', '', text)
 
@@ -2055,8 +2070,8 @@ def _merge_gdrive_lines(lines: list) -> list:
                 if re.search(r'โปรโมชั่น|promotion', s, re.IGNORECASE):
                     items_merged.append(s)
                     in_items = True
-                            elif re.match(r'^ส่วนลด\s*$', s):
-                                in_items = True
+                elif re.match(r'^ส่วนลด\s*$', s):
+                    in_items = True
                 elif not in_items and _skip_hdr.search(s):
                     header_lines.append(s)
                 else:

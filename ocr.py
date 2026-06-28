@@ -2937,8 +2937,8 @@ def run_batch_mode_ui():
                 st.rerun()
 # ── Google Sheets API ──────────────────────────────────────────────────────
 _SHEETS_FILE_ID = "1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ"
-_SHEET_CORRECT  = "sheet 1"   # ชื่อ sheet สำหรับชื่อดิบ → ชื่อถูก
-_SHEET_DELETED  = "sheet 2"    # ชื่อ sheet สำหรับรายการที่ถูกลบ
+_SHEET_CORRECT  = "sheet1"   # ชื่อ sheet สำหรับชื่อดิบ → ชื่อถูก
+_SHEET_DELETED  = "sheet2"    # ชื่อ sheet สำหรับรายการที่ถูกลบ
 
 def _sheets_append(token: str, sheet_name: str, rows: list):
     """append rows ลง Google Sheet"""

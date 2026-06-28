@@ -41,7 +41,7 @@ def save_to_sheets(all_bills):
     except Exception as e:
         st.error(f"บันทึกไม่สำเร็จ: {e}")
         return False
-     except Exception as e:
+    except Exception as e:
             # เพิ่มบรรทัดนี้เพื่อดูรายละเอียดของ Error ที่แท้จริง
         st.error(f"รายละเอียด Error: {e}")
         return False

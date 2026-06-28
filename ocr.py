@@ -26,7 +26,10 @@ def save_to_sheets(all_bills):
         client = gspread.authorize(creds)
         # ใส่ ID ของไฟล์ที่คุณต้องการบันทึก
         sheet = client.open_by_key("1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ").worksheet("Data")
-        
+        except Exception as e:
+            # เพิ่มบรรทัดนี้เพื่อดูรายละเอียดของ Error ที่แท้จริง
+            st.error(f"รายละเอียด Error: {e}")
+            return False
         # เตรียมแถวข้อมูล (ปรับแก้หัวข้อคอลัมน์ให้ตรงกับที่ใช้จริง)
         rows = []
         for b in all_bills:
@@ -3475,8 +3478,9 @@ def main():
                            use_container_width=True)
             if st.button("💾 บันทึกลง Google Sheets"):
                 with st.spinner("กำลังบันทึกข้อมูล..."):
+                    # ย้าย if มาอยู่ใต้ with โดยเว้นระยะให้ตรงกัน
                     if save_to_sheets(S.all_bills):
-                        st.success("บันทึกข้อมูลสำเร็จแล้ว!")   
+                        st.success("บันทึกข้อมูลสำเร็จแล้ว!")  
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v

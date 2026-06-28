@@ -388,7 +388,12 @@ def split_by_positions(img_cv, split_px_list):
 # ─────────────────────────────────────────────────────────────────────────────
 # Google Drive OCR
 # ─────────────────────────────────────────────────────────────────────────────
-_GDRIVE_SCOPES    = "https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+_GDRIVE_SCOPES = (
+    "https://www.googleapis.com/auth/drive "
+    "https://www.googleapis.com/auth/spreadsheets "
+    "https://www.googleapis.com/auth/userinfo.email "
+    "https://www.googleapis.com/auth/userinfo.profile"
+)
 _GDRIVE_AUTH_URL  = "https://accounts.google.com/o/oauth2/v2/auth"
 _GDRIVE_TOKEN_URL = "https://oauth2.googleapis.com/token"
 
@@ -698,7 +703,114 @@ def run_ocr(crop_cv, engine: str = "tesseract"):
         return clean_text(text)
     except Exception as e:
         return f"[OCR ERROR] {e}"
+# ── Cache ข้อมูลจาก Sheet ──────────────────────────────────────────────────
+def _load_correct_items_from_sheet(token: str) -> list:
+    """โหลดรายการที่ถูกต้องจาก Sheet มา cache"""
+    import requests as _req
+    try:
+        url = (f"https://sheets.googleapis.com/v4/spreadsheets/{_SHEETS_FILE_ID}"
+               f"/values/{_SHEET_CORRECT}!A:K")
+        resp = _req.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if not resp.ok: return []
+        rows = resp.json().get("values", [])
+        if len(rows) < 2: return []
+        # header: วันที่บันทึก, ไฟล์บิล, วันที่บิล, รหัสสาขา,
+        #         ชื่อ OCR (ดิบ), ชื่อที่ถูกต้อง, หมวดหมู่, จำนวน, ราคาต่อหน่วย, ยอดรวม, หมายเหตุ
+        result = []
+        for row in rows[1:]:  # skip header
+            if len(row) >= 7:
+                result.append({
+                    "ocr_name":    row[4] if len(row) > 4 else "",
+                    "correct_name": row[5] if len(row) > 5 else "",
+                    "category":    row[6] if len(row) > 6 else "",
+                    "unit_price":  float(row[8]) if len(row) > 8 and row[8] else 0.0,
+                })
+        return result
+    except Exception:
+        return []
 
+
+def _find_similar_item(ocr_name: str, known_items: list, threshold: float = 0.6) -> dict | None:
+    """หา item ที่ชื่อคล้ายกันจาก known_items"""
+    if not ocr_name or not known_items:
+        return None
+    
+    def _similarity(a: str, b: str) -> float:
+        """คำนวณความคล้ายกันแบบง่ายๆ"""
+        a = re.sub(r'\s+', '', a.lower())
+        b = re.sub(r'\s+', '', b.lower())
+        if not a or not b: return 0.0
+        if a == b: return 1.0
+        if a in b or b in a: return 0.85
+        # นับตัวอักษรร่วมกัน
+        common = sum(1 for c in a if c in b)
+        return common / max(len(a), len(b))
+    
+    best_match = None
+    best_score = 0.0
+    
+    for item in known_items:
+        # เปรียบเทียบกับ ocr_name เดิม
+        score1 = _similarity(ocr_name, item.get("ocr_name", ""))
+        # เปรียบเทียบกับ correct_name ด้วย
+        score2 = _similarity(ocr_name, item.get("correct_name", ""))
+        score = max(score1, score2)
+        
+        if score > best_score and score >= threshold:
+            best_score = score
+            best_match = item
+    
+    return best_match if best_match else None
+
+
+def enrich_items_from_sheet(items: list, token: str) -> list:
+    """แทนที่ชื่อ/หมวดหมู่ที่ผิดด้วยข้อมูลจาก Sheet"""
+    if not token or not items:
+        return items
+    
+    # โหลด cache (ทำครั้งเดียวต่อ session)
+    cache_key = "_sheet_correct_items_cache"
+    if cache_key not in st.session_state:
+        with st.spinner("🔍 โหลดข้อมูลอ้างอิงจาก Google Sheets..."):
+            st.session_state[cache_key] = _load_correct_items_from_sheet(token)
+    
+    known_items = st.session_state[cache_key]
+    if not known_items:
+        return items
+    
+    enriched = []
+    for it in items:
+        name = it.get("ชื่อสินค้า", "")
+        cat  = it.get("หมวดหมู่", "")
+        
+        # ถ้าชื่อดูเหมือน noise หรือหมวดเป็น เบ็ดเตล็ด → ลอง lookup
+        should_lookup = (
+            len(name) < 4 or
+            cat == "สินค้าเบ็ดเตล็ดอื่นๆ" or
+            re.search(r'[A-Za-z]{3,}(?:\d+)?$', name) or  # ชื่อเป็น Latin ล้วน
+            not re.search(r'[ก-๙]', name)  # ไม่มีภาษาไทยเลย
+        )
+        
+        if should_lookup:
+            match = _find_similar_item(name, known_items)
+            if match:
+                new_name = match["correct_name"]
+                new_cat  = match["category"] or cat
+                st.session_state.setdefault("_sheet_enriched_log", []).append(
+                    f'"{name}" → "{new_name}" [{new_cat}]'
+                )
+                enriched.append({
+                    **it,
+                    "ชื่อสินค้า":    new_name,
+                    "หมวดหมู่":     new_cat,
+                    "ชื่อ OCR เดิม": name,  # เก็บชื่อเดิมไว้
+                    "from_sheet":    True,   # flag ว่ามาจาก Sheet
+                })
+                continue
+        
+        enriched.append(it)
+    
+    return enriched
 # ─────────────────────────────────────────────────────────────────────────────
 # Gemini API
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1108,7 +1220,8 @@ OCR แก้ชื่อผิด:
 
         if not items:
             items = universal_item_parser(raw_text)
-
+        if is_gdrive_token_ready():
+            items = enrich_items_from_sheet(items, st.session_state["gdrive_token"])
         return {"bill": bill, "items": items, "ok": True}
 
     except Exception as e:
@@ -2054,11 +2167,11 @@ def _merge_gdrive_lines(lines: list) -> list:
                         for _fj in range(_cur_line_idx + 1, min(_cur_line_idx + 5, len(lines))):
                             _fl = lines[_fj].strip()
                             _flc = re.sub(r'\s*[Vv]\s*$', '', _fl).strip()
-                        if _price_only.match(_flc) and not re.search(r'[ก-๙]', _flc) and not _neg_price.match(_flc):
-                            _found_price = _flc
-                            break
-                        elif _has_thai.search(_fl):
-                            break
+                            if _price_only.match(_flc) and not re.search(r'[ก-๙]', _flc) and not _neg_price.match(_flc):
+                                _found_price = _flc
+                                break
+                            elif _has_thai.search(_fl):
+                                break
                         if _found_price:
                             items_merged.append(f"{cur_name} {_found_price} {_found_price}")
                         else:
@@ -2807,73 +2920,266 @@ def run_batch_mode_ui():
     if S.all_bills:
         _render_bills_ui(S.all_bills, key_prefix="b")
         st.divider()
-        dl_c, rs_c = st.columns([3,1])
+        dl_c, sheets_c, rs_c = st.columns([2, 2, 1])
         with dl_c:
             st.download_button(t("download"), data=build_excel(S.all_bills),
                                file_name="receipts.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                use_container_width=True)
+        with sheets_c:                                  # ← เพิ่ม
+            if st.button("📊 บันทึกลง Google Sheets",
+                         use_container_width=True, type="secondary",
+                         key="single_save_sheets"):
+                save_to_sheets(S.all_bills)                   
         with rs_c:
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
+# ── Google Sheets API ──────────────────────────────────────────────────────
+_SHEETS_FILE_ID = "1IhQFHxlK7vlAJ-xxgWNA_M2fcXp-9jZm8WQZGZC4MxQ"
+_SHEET_CORRECT  = "รายการที่ถูก"   # ชื่อ sheet สำหรับชื่อดิบ → ชื่อถูก
+_SHEET_DELETED  = "รายการที่ลบ"    # ชื่อ sheet สำหรับรายการที่ถูกลบ
 
+def _sheets_append(token: str, sheet_name: str, rows: list):
+    """append rows ลง Google Sheet"""
+    import requests as _req
+    url = (f"https://sheets.googleapis.com/v4/spreadsheets/{_SHEETS_FILE_ID}"
+           f"/values/{sheet_name}!A1:Z1000:append"
+           f"?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS")
+    body = {"values": rows}
+    resp = _req.post(url, json=body,
+                     headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+def _sheets_ensure_headers(token: str):
+    """สร้าง header row ถ้า sheet ยังว่างอยู่"""
+    import requests as _req
+    headers_map = {
+        _SHEET_CORRECT: ["วันที่บันทึก","ไฟล์บิล","วันที่บิล","รหัสสาขา",
+                         "ชื่อ OCR (ดิบ)","ชื่อที่ถูกต้อง","หมวดหมู่",
+                         "จำนวน","ราคาต่อหน่วย","ยอดรวม","หมายเหตุ"],
+        _SHEET_DELETED: ["วันที่บันทึก","ไฟล์บิล","วันที่บิล","รหัสสาขา",
+                         "ชื่อ OCR (ที่ลบ)","หมวดหมู่เดิม","ราคาเดิม","สาเหตุที่ลบ"],
+    }
+    for sheet_name, header in headers_map.items():
+        url = (f"https://sheets.googleapis.com/v4/spreadsheets/{_SHEETS_FILE_ID}"
+               f"/values/{sheet_name}!A1")
+        resp = _req.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=10)
+        if resp.ok:
+            data = resp.json().get("values", [])
+            if not data:  # ว่างอยู่ → ใส่ header
+                _sheets_append(token, sheet_name, [header])
+
+def save_to_sheets(all_bills: list):
+    """บันทึกรายการที่แก้/ลบ ลง Google Sheet"""
+    if not is_gdrive_token_ready():
+        st.error("❌ กรุณา Login Google Drive ก่อน")
+        return False
+    token = st.session_state["gdrive_token"]
+    
+    try:
+        _sheets_ensure_headers(token)
+        
+        from datetime import datetime
+        now = datetime.now().strftime("%d/%m/%Y %H:%M")
+        
+        correct_rows = []
+        deleted_rows = []
+        
+        for b in all_bills:
+            bill_date   = b['bill'].get('date', '')
+            branch_id   = b['bill'].get('pos_id', '')
+            filename    = b['filename']
+            
+            # ── รายการที่ถูก (เพิ่มเอง + แก้ชื่อ) ──
+            for it in b.get('items', []):
+                if it.get('is_manual') or it.get('ชื่อ OCR เดิม'):
+                    correct_rows.append([
+                        now, filename, bill_date, branch_id,
+                        it.get('ชื่อ OCR เดิม', ''),   # ชื่อดิบจาก OCR
+                        it.get('ชื่อสินค้า', ''),       # ชื่อที่ถูกต้อง
+                        it.get('หมวดหมู่', ''),
+                        it.get('จำนวน', 1),
+                        it.get('ราคาต่อหน่วย', 0),
+                        it.get('ยอดรวมสินค้า', 0),
+                        'เพิ่มเอง' if not it.get('ชื่อ OCR เดิม') else 'Gemini แปลง',
+                    ])
+            
+            # ── รายการที่ถูกลบ ──
+            for it in b.get('deleted_items', []):
+                deleted_rows.append([
+                    now, filename, bill_date, branch_id,
+                    it.get('deleted_name_ocr', ''),
+                    it.get('หมวดหมู่', ''),
+                    it.get('ยอดรวมสินค้า', 0),
+                    'ลบโดยผู้ใช้',
+                ])
+        
+        if correct_rows:
+            _sheets_append(token, _SHEET_CORRECT, correct_rows)
+        if deleted_rows:
+            _sheets_append(token, _SHEET_DELETED, deleted_rows)
+        
+        total = len(correct_rows) + len(deleted_rows)
+        st.success(f"✅ บันทึกลง Google Sheets แล้ว {total} รายการ "
+                   f"({len(correct_rows)} แก้/เพิ่ม, {len(deleted_rows)} ลบ)")
+        return True
+        
+    except Exception as e:
+        st.error(f"❌ บันทึกไม่สำเร็จ: {e}")
+        return False
+def gemini_clean_item_name(raw_name: str, raw_text: str = "") -> dict:
+    prompt = f"""ชื่อสินค้าจาก OCR ใบเสร็จ CJ Express อ่านผิด:
+"{raw_name}"
+
+{f'บริบทจากบิล:{chr(10)}{raw_text[:500]}' if raw_text else ''}
+
+{CJ_PRODUCT_KNOWLEDGE}
+{BAO_CAFE_MENU}
+
+แปลงชื่อ OCR ผิดๆ เป็นชื่อสินค้าที่ถูกต้อง และเลือกหมวดหมู่
+
+{CATEGORY_PROMPT}
+
+ตอบ JSON เท่านั้น:
+{{"ชื่อที่ถูกต้อง": "", "หมวดหมู่": ""}}"""
+    try:
+        raw = _call_gemini(prompt, max_tokens=200)
+        raw = re.sub(r"```(?:json)?\s*|\s*```", "", raw).strip()
+        data = json.loads(raw)
+        return {
+            "ชื่อที่ถูกต้อง": str(data.get("ชื่อที่ถูกต้อง", raw_name)),
+            "หมวดหมู่":      str(data.get("หมวดหมู่", "สินค้าเบ็ดเตล็ดอื่นๆ")),
+        }
+    except Exception:
+        return {"ชื่อที่ถูกต้อง": raw_name, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}   
 def _render_bills_ui(all_bills, key_prefix=""):
     st.success(t("found")(len(all_bills)))
-    # แสดงรายชื่อไฟล์รูปไม่ชัด
-    blurry_files = [b["filename"] for b in all_bills if b.get("blurry")]
-    if blurry_files:
-        st.error(
-            "⚠️ **รูปต่อไปนี้ไม่ชัด — ไม่สามารถ OCR ได้:**\n"
-            + "\n".join(f"• {f}" for f in blurry_files),
-            icon="📷"
-        )
-
+    
     for idx, b in enumerate(all_bills):
-        is_blurry = b.get("blurry", False)
-        label_icon = "📷" if is_blurry else "📄"
-        with st.expander(f"{label_icon} {b['filename']}" + (" — รูปไม่ชัด" if is_blurry else ""), expanded=not is_blurry):
-            if is_blurry:
-                st.error("⚠️ รูปนี้ไม่ชัดเกินไป — กรุณาถ่ายรูปใหม่ให้ชัดขึ้น")
-                if b.get("image"): st.image(b["image"], width=200)
-            else:
-                ic, dc = st.columns([1,2])
-                with ic:
-                    if b.get('image'): st.image(b['image'], use_container_width=True)
-                with dc:
-                    d = b['bill']
-                    st.markdown("**ตรวจสอบ / แก้ไข**")
-                    r1 = st.columns(5)
-                    d['date']        = r1[0].text_input("วันที่",         d['date'],               key=f"{key_prefix}dt{idx}")
-                    d['time']        = r1[1].text_input("เวลา",           d['time'],               key=f"{key_prefix}tm{idx}")
-                    d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],             key=f"{key_prefix}ps{idx}")
-                    d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''), key=f"{key_prefix}pm{idx}")
-                    d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],            key=f"{key_prefix}rc{idx}")
-                    tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"{key_prefix}tot{idx}")
-                    d['total_amount'] = parse_price(tot_str)
-                st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
-                if b['items']:
-                    st.markdown("**🛒 รายการสินค้า**")
-                    items_display = b['items'].copy()
-                    for i, it in enumerate(items_display):
-                        if _is_bao_item(it.get("ชื่อสินค้า", "")):
-                            items_display[i] = {**it, "หมวดหมู่": BAO_CAFE_CATEGORY}
-                        elif not it.get("หมวดหมู่"):
-                            items_display[i] = {**it, "หมวดหมู่": "สินค้าเบ็ดเตล็ดอื่นๆ"}
-                    st.dataframe(pd.DataFrame(items_display), use_container_width=True, hide_index=True)
-                else:
-                    st.info(t("no_items"))
-                with st.expander(f"🔬 {t('raw_text')} + debug"):
-                    gdrive_raws = st.session_state.get("_gdrive_raw_texts", [])
-                    if S.ocr_engine == "gdrive" and idx < len(gdrive_raws):
-                        st.markdown("**📄 ข้อความดิบจาก Google Doc (ก่อน clean)**")
-                        st.text_area("Google Doc raw", gdrive_raws[idx], height=200,
-                                     key=f"{key_prefix}gdraw{idx}", disabled=True)
-                        st.markdown("---")
-                        st.markdown("**🧹 หลัง clean_text**")
-                    st.text_area("Raw OCR (cleaned)", b['raw_text'], height=160,
-                                 key=f"{key_prefix}raw{idx}", disabled=True)
-                    st.json({k:v for k,v in b['bill'].items()})
+        with st.expander(f"📄 {b['filename']}", expanded=True):
+            ic, dc = st.columns([1,2])
+            with ic:
+                if b.get('image'): st.image(b['image'], use_container_width=True)
+            with dc:
+                d = b['bill']
+                r1 = st.columns(5)
+                d['date']        = r1[0].text_input("วันที่",         d['date'],               key=f"{key_prefix}dt{idx}")
+                d['time']        = r1[1].text_input("เวลา",           d['time'],               key=f"{key_prefix}tm{idx}")
+                d['pos_id']      = r1[2].text_input("รหัสสาขา",      d['pos_id'],             key=f"{key_prefix}ps{idx}")
+                d['pos_machine'] = r1[3].text_input("POS ID",         d.get('pos_machine',''), key=f"{key_prefix}pm{idx}")
+                d['rcpt_no']     = r1[4].text_input("เลขที่ใบเสร็จ", d['rcpt_no'],            key=f"{key_prefix}rc{idx}")
+                tot_str = st.text_input("ยอดรวม", f"{float(d['total_amount']):.2f}", key=f"{key_prefix}tot{idx}")
+                d['total_amount'] = parse_price(tot_str)
+
+            st.metric("💰 ยอดรวม", f"{d['total_amount']:.2f} ฿")
+            enriched_log = st.session_state.get("_sheet_enriched_log", [])
+            if enriched_log:
+                with st.expander(f"🔗 จับคู่จาก Sheet {len(enriched_log)} รายการ"):
+                    for log in enriched_log:
+                        st.caption(f"✅ {log}")
+                st.session_state["_sheet_enriched_log"] = []  # clear หลังแสดง
+
+            # ── init session state สำหรับ items และ deleted ──
+            items_key   = f"items_{key_prefix}{idx}"
+            deleted_key = f"deleted_{key_prefix}{idx}"
+            if items_key not in st.session_state:
+                st.session_state[items_key] = b['items'].copy()
+            if deleted_key not in st.session_state:
+                st.session_state[deleted_key] = []  # เก็บรายการที่ถูกลบ
+
+            items = st.session_state[items_key]
+
+            st.markdown("**🛒 รายการสินค้า**")
+            
+            # ── แสดง items พร้อมปุ่มลบ ──
+            for ii, it in enumerate(items):
+                col_name, col_cat, col_qty, col_price, col_total, col_del = st.columns([3,2,1,1.5,1.5,0.5])
+                
+                # แก้ไขชื่อ inline
+                new_name = col_name.text_input(
+                    "ชื่อ", it.get("ชื่อสินค้า",""),
+                    key=f"{key_prefix}name{idx}_{ii}", label_visibility="collapsed")
+                new_cat = col_cat.selectbox(
+                    "หมวด", 
+                    ["Bao Cafe","อาหารพร้อมทานและเบเกอรี่","ขนมและของขบเคี้ยว",
+                     "เครื่องดื่ม","ของใช้ส่วนตัว","ของใช้ในบ้าน",
+                     "เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ","สินค้าเบ็ดเตล็ดอื่นๆ","ส่วนลด/โปรโมชั่น"],
+                    index=0 if it.get("หมวดหมู่") not in ["Bao Cafe","อาหารพร้อมทานและเบเกอรี่","ขนมและของขบเคี้ยว","เครื่องดื่ม","ของใช้ส่วนตัว","ของใช้ในบ้าน","เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ","สินค้าเบ็ดเตล็ดอื่นๆ","ส่วนลด/โปรโมชั่น"] else ["Bao Cafe","อาหารพร้อมทานและเบเกอรี่","ขนมและของขบเคี้ยว","เครื่องดื่ม","ของใช้ส่วนตัว","ของใช้ในบ้าน","เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ","สินค้าเบ็ดเตล็ดอื่นๆ","ส่วนลด/โปรโมชั่น"].index(it.get("หมวดหมู่","สินค้าเบ็ดเตล็ดอื่นๆ")),
+                    key=f"{key_prefix}cat{idx}_{ii}", label_visibility="collapsed")
+                new_qty = col_qty.number_input(
+                    "จำนวน", min_value=1, value=int(it.get("จำนวน",1)),
+                    key=f"{key_prefix}qty{idx}_{ii}", label_visibility="collapsed")
+                new_price = col_price.number_input(
+                    "ราคา/หน่วย", value=float(it.get("ราคาต่อหน่วย",0)),
+                    key=f"{key_prefix}uprice{idx}_{ii}", label_visibility="collapsed")
+                new_total = col_total.number_input(
+                    "รวม", value=float(it.get("ยอดรวมสินค้า",0)),
+                    key=f"{key_prefix}total{idx}_{ii}", label_visibility="collapsed")
+
+                # อัปเดตค่า
+                items[ii] = {
+                    "ชื่อสินค้า": new_name, "หมวดหมู่": new_cat,
+                    "จำนวน": new_qty, "ราคาต่อหน่วย": new_price,
+                    "ยอดรวมสินค้า": new_total,
+                    "is_manual": it.get("is_manual", False)
+                }
+
+                # ปุ่มลบ
+                if col_del.button("🗑", key=f"{key_prefix}del{idx}_{ii}", help="ลบรายการนี้"):
+                    deleted = it.copy()
+                    deleted["deleted_from_bill"] = b['filename']
+                    deleted["deleted_name_ocr"]  = it.get("ชื่อสินค้า","")
+                    st.session_state[deleted_key].append(deleted)
+                    st.session_state[items_key].pop(ii)
+                    st.rerun()
+
+            # ── เพิ่มรายการใหม่ ──
+            st.markdown("---")
+            st.markdown("**➕ เพิ่มรายการ**")
+            add_cols = st.columns([3,2,1,1.5,1.5,1])
+            new_item_name  = add_cols[0].text_input("ชื่อสินค้า", key=f"{key_prefix}add_name{idx}", placeholder="ชื่อสินค้า")
+            new_item_cat   = add_cols[1].selectbox("หมวด", 
+                ["Bao Cafe","อาหารพร้อมทานและเบเกอรี่","ขนมและของขบเคี้ยว",
+                 "เครื่องดื่ม","ของใช้ส่วนตัว","ของใช้ในบ้าน",
+                 "เวชภัณฑ์และอุปกรณ์ดูแลสุขภาพ","สินค้าเบ็ดเตล็ดอื่นๆ","ส่วนลด/โปรโมชั่น"],
+                key=f"{key_prefix}add_cat{idx}")
+            new_item_qty   = add_cols[2].number_input("จำนวน", min_value=1, value=1, key=f"{key_prefix}add_qty{idx}")
+            new_item_price = add_cols[3].number_input("ราคา/หน่วย", value=0.0, key=f"{key_prefix}add_price{idx}")
+            new_item_total = add_cols[4].number_input("รวม", value=0.0, key=f"{key_prefix}add_total{idx}")
+            
+            if add_cols[5].button("➕ เพิ่ม", key=f"{key_prefix}add_btn{idx}"):
+                if new_item_name.strip():
+                    with st.spinner("✨ Gemini กำลังแปลงชื่อ..."):
+                        cleaned = gemini_clean_item_name(
+                            raw_name=new_item_name.strip(),
+                            raw_text=b.get('raw_text', '')
+                        )
+                    corrected_name = cleaned["ชื่อที่ถูกต้อง"]
+                    corrected_cat  = cleaned["หมวดหมู่"]
+                    final_cat = new_item_cat if new_item_cat != "สินค้าเบ็ดเตล็ดอื่นๆ" else corrected_cat
+                    total_val = new_item_total if new_item_total != 0 else new_item_price * new_item_qty
+                    st.session_state[items_key].append({
+                        "ชื่อสินค้า":      corrected_name,
+                        "ชื่อ OCR เดิม":  new_item_name.strip(),
+                        "หมวดหมู่":       final_cat,
+                        "จำนวน":          new_item_qty,
+                        "ราคาต่อหน่วย":  new_item_price,
+                        "ยอดรวมสินค้า":  total_val,
+                        "is_manual":      True,
+                    })
+                    st.success(f'✅ "{new_item_name}" → **"{corrected_name}"** [{final_cat}]')
+                    st.rerun()
+
+            # sync กลับ
+            b['items'] = st.session_state[items_key]
+            b['deleted_items'] = st.session_state[deleted_key]
+
+            # raw text
+            with st.expander("🔬 ข้อความดิบ (คัดลอกชื่อสินค้าจากนี้)"):
+                st.text_area("", b['raw_text'], height=200,
+                             key=f"{key_prefix}raw{idx}", disabled=False)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN UI
@@ -3141,6 +3447,9 @@ def main():
             if st.button(t("reset"), use_container_width=True):
                 for k,v in _DEFAULTS.items(): S[k]=v
                 st.rerun()
+            if st.button("🔄 Refresh ข้อมูลจาก Sheet", key="refresh_sheet_cache"):
+                st.session_state.pop("_sheet_correct_items_cache", None)
+                st.success("✅ ล้าง cache แล้ว จะโหลดใหม่รอบหน้า")
 
 if __name__ == "__main__":
     main()
